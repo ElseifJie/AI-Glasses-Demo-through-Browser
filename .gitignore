@@ -1,0 +1,19 @@
+node_modules/
+.DS_Store
+dist/
+.env
+.venv/
+.runtime-venv/
+**/.venv/
+**/.venv*/
+**/.runtime-venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+coverage/
+.dev-pids
+.dev-logs/
+.arkclaw-device.json
+# Local-only user memory generated at runtime; never commit.
+memory_store.json
+/reference/

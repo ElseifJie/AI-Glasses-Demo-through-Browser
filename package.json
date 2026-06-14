@@ -1,0 +1,20 @@
+{
+  "name": "ai-glasses-agent-arkclaw",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace @ai-glasses/glasses-web run dev",
+    "dev:gateway": "npm --workspace @ai-glasses/gateway run dev",
+    "dev:veadk": "bash scripts/run-veadk.sh",
+    "dev:start": "bash scripts/dev.sh start",
+    "dev:stop": "bash scripts/dev.sh stop",
+    "dev:status": "bash scripts/dev.sh status",
+    "dev:logs": "bash scripts/dev.sh logs",
+    "test:smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {}
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@ai-glasses/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@ai-glasses/shared": "0.1.0",
+    "@volcengine/arkclaw": "^1.0.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.18.0"
+  }
+}

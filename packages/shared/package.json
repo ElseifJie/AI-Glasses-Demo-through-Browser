@@ -1,0 +1,8 @@
+{
+  "name": "@ai-glasses/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/protocol.mjs"
+  }
+}
