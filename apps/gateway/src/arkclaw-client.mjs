@@ -143,7 +143,8 @@ export class ArkClawClient {
     this.challengeNonce = null;
     this.challengeResolvers = [];
     this.chatRuns = new Map();
-    this._lock = null;
+    this._busy = false;
+    this._waiters = [];
   }
 
   isConfigured() {
@@ -155,29 +156,38 @@ export class ArkClawClient {
     );
   }
 
+  async _acquire(callId) {
+    if (!this._busy) {
+      this._busy = true;
+      return;
+    }
+    console.log(`[arkclaw:${callId}] waiting for previous task to complete`);
+    await new Promise((resolve) => this._waiters.push(resolve));
+  }
+
+  _release(callId) {
+    if (this._waiters.length) {
+      console.log(`[arkclaw:${callId}] releasing queue, waking next waiter`);
+      this._waiters.shift()();
+    } else {
+      this._busy = false;
+    }
+  }
+
   async sendTextCommand(text) {
     if (!this.isConfigured()) {
       throw new Error("ArkClaw gateway credentials are not fully configured.");
     }
 
     const callId = crypto.randomUUID().slice(0, 8);
-    console.log(`[arkclaw:${callId}] sendTextCommand ENTER, text="${text.slice(0, 40)}", lock=${this._lock ? "BUSY" : "free"}`);
+    console.log(`[arkclaw:${callId}] sendTextCommand ENTER, text="${text.slice(0, 40)}"`);
 
-    if (this._lock) {
-      console.log(`[arkclaw:${callId}] aborting stale lock from previous call, disconnecting`);
-      this._disconnect();
-    }
-
-    const lock = {};
-    this._lock = lock;
-    console.log(`[arkclaw:${callId}] lock acquired`);
+    await this._acquire(callId);
+    console.log(`[arkclaw:${callId}] acquired`);
 
     try {
-      console.log(`[arkclaw:${callId}] calling _resetState`);
       this._resetState();
-      console.log(`[arkclaw:${callId}] calling _open`);
       await this._open();
-      console.log(`[arkclaw:${callId}] _open done, calling _connectOrPair`);
       const authResult = await this._connectOrPair();
       console.log(`[arkclaw:${callId}] authResult=${authResult.status}`);
 
@@ -194,7 +204,7 @@ export class ArkClawClient {
       const runId = crypto.randomUUID();
       const finalResult = this._waitForChatRun(runId);
       const fullMessage = `请以用户身份（default 模式）执行以下操作，所有创建的文档、日程均以用户的身份创建：\n${text}`;
-      console.log(`[arkclaw:${callId}] sending chat.send, runId=${runId}, text="${text}"`);
+      console.log(`[arkclaw:${callId}] sending chat.send, runId=${runId}`);
       await this._request("chat.send", {
         sessionKey: this.config.sessionKey,
         message: fullMessage,
@@ -211,21 +221,12 @@ export class ArkClawClient {
         detail,
       };
     } catch (error) {
-      console.log(`[arkclaw:${callId}] catch error="${error.message}", lock_matches=${this._lock === lock}`);
-      if (error.message === "CANCELLED" || this._lock !== lock) {
-        console.log(`[arkclaw:${callId}] cancelled, returning silently`);
-        return { status: "cancelled", detail: "任务已被新指令替换" };
-      }
+      console.log(`[arkclaw:${callId}] error="${error.message}"`);
       throw error;
     } finally {
-      console.log(`[arkclaw:${callId}] finally, lock_matches=${this._lock === lock}`);
-      if (this._lock === lock) {
-        this._disconnect();
-        this._lock = null;
-        console.log(`[arkclaw:${callId}] disconnected and lock released`);
-      } else {
-        console.log(`[arkclaw:${callId}] skipping disconnect (not lock owner)`);
-      }
+      this._disconnect();
+      this._release(callId);
+      console.log(`[arkclaw:${callId}] disconnected and released`);
     }
   }
 

@@ -126,7 +126,7 @@ async function testVeadkVision() {
   log(`[pass] veadk vision -> ${payload.speechText}`);
 }
 
-async function collectGatewayResult(sendEvents, assertResult) {
+async function collectGatewayResult(sendEvents, targetPhase, assertResult) {
   const sessionId = randomUUID();
 
   return await new Promise((resolve, reject) => {
@@ -158,6 +158,10 @@ async function collectGatewayResult(sendEvents, assertResult) {
       }
 
       if (payload.type === "assistant.result") {
+        const phase = payload.meta?.phase || "";
+        if (phase !== targetPhase) {
+          return;
+        }
         try {
           assertResult(payload);
           cleanup();
@@ -184,17 +188,18 @@ async function testGatewayChat() {
       { type: "session.start", sessionId },
       { type: "transcript.user", sessionId, text: "请用一句话介绍北京", source: "smoke-test" }
     ],
+    "final",
     (result) => {
       if (result.route !== "veadk") {
         throw new Error(`expected veadk route, got ${result.route}`);
       }
-      if (!result.displayText || !result.speechText) {
+      if (!result.displayText && !result.speechText) {
         throw new Error("gateway text result was empty");
       }
     }
   );
 
-  log(`[pass] gateway chat -> ${payload.speechText}`);
+  log(`[pass] gateway chat -> ${payload.displayText}`);
 }
 
 async function testGatewayImage() {
@@ -208,17 +213,18 @@ async function testGatewayImage() {
         dataUrl: sampleImageUrl
       }
     ],
+    "final",
     (result) => {
       if (result.route !== "veadk") {
         throw new Error(`expected veadk route for image flow, got ${result.route}`);
       }
-      if (!result.displayText || !result.speechText) {
+      if (!result.displayText && !result.speechText) {
         throw new Error("gateway image result was empty");
       }
     }
   );
 
-  log(`[pass] gateway image -> ${payload.speechText}`);
+  log(`[pass] gateway image -> ${payload.displayText}`);
 }
 
 async function testGatewayArkClaw() {
@@ -232,6 +238,7 @@ async function testGatewayArkClaw() {
         source: "smoke-test"
       }
     ],
+    "result",
     (result) => {
       if (result.route !== "arkclaw") {
         throw new Error(`expected arkclaw route, got ${result.route}`);

@@ -168,13 +168,13 @@ function renderHistoryModal() {
       const timing = item.timing;
       const timingHtml = timing
         ? `<div class="h-latency">
-            <span class="seg ${timing.asrMs < 500 ? "g" : timing.asrMs < 1500 ? "w" : "b"}">ASR ${timing.asrMs}ms</span>
+            <span class="seg ${timing.asrMs < 500 ? "g" : timing.asrMs < 1500 ? "w" : "b"}">🎙️ ASR时延 ${timing.asrMs}ms</span>
             <span class="arw">→</span>
-            <span class="seg ${timing.agentMs < 500 ? "g" : timing.agentMs < 1500 ? "w" : "b"}">Agent ${timing.agentMs}ms</span>
+            <span class="seg ${timing.agentMs < 500 ? "g" : timing.agentMs < 1500 ? "w" : "b"}">🧠 Agent时延 ${timing.agentMs}ms</span>
             <span class="arw">→</span>
-            <span class="seg ${timing.ttsMs < 500 ? "g" : timing.ttsMs < 1500 ? "w" : "b"}">TTS ${timing.ttsMs}ms</span>
+            <span class="seg ${timing.ttsMs < 500 ? "g" : timing.ttsMs < 1500 ? "w" : "b"}">🔊 TTS时延 ${timing.ttsMs}ms</span>
             <span class="arw">=</span>
-            <span class="seg ${timing.totalMs < 500 ? "g" : timing.totalMs < 1500 ? "w" : "b"}">总计 ${timing.totalMs}ms</span>
+            <span class="seg ${timing.totalMs < 500 ? "g" : timing.totalMs < 1500 ? "w" : "b"}">端到端总计 ${timing.totalMs}ms</span>
           </div>`
         : "";
       return `
@@ -236,6 +236,18 @@ function connectGateway() {
       case ServerEvent.SESSION_STATE:
         state.sessionState = payload.state;
         renderStatus(payload.message);
+        if (payload.state === "listening" && !state.sessionActive) {
+          state.sessionActive = true;
+          startButton.disabled = true;
+          stopButton.disabled = false;
+          photoButton.disabled = false;
+        }
+        if (payload.state === "idle") {
+          state.sessionActive = false;
+          startButton.disabled = false;
+          stopButton.disabled = true;
+          photoButton.disabled = true;
+        }
         break;
       case ServerEvent.TRANSCRIPT_PARTIAL:
         state.transcript = payload.text;
@@ -249,6 +261,8 @@ function connectGateway() {
 
         removeStreamingTranscript();
 
+        state._audioMuted = false;
+
         const isAck = payload.meta?.phase === "ack";
         const isResult = payload.meta?.phase === "result";
         const isSentence = payload.meta?.phase === "sentence";
@@ -257,7 +271,6 @@ function connectGateway() {
 
         if (isSentence) {
           if (!state._streaming) {
-            state._audioMuted = false;
             if (payload.meta?.intent === "image_understanding") {
               const phIdx = state.conversation.findIndex(
                 (item) => item.type === "agent" && item._placeholder
@@ -317,6 +330,7 @@ function connectGateway() {
             renderMessages();
             renderLatencyLog();
           }
+          playAssistantAudio(payload);
           break;
         }
 
@@ -355,7 +369,7 @@ function connectGateway() {
             speechText: payload.speechText || "",
             timing: payload.timing || null
           });
-        } else {
+        } else if (!isAck) {
           saveHistory({
             time: new Date().toLocaleString("zh-CN"),
             route: payload.route || "veadk",
@@ -368,9 +382,27 @@ function connectGateway() {
         }
         break;
       case ServerEvent.ASSISTANT_TASK:
-        state.tasks.unshift(payload);
+        {
+          const existing = state.tasks.find((t) => t.taskId === payload.taskId);
+          if (existing) {
+            existing.status = payload.status;
+            existing.detail = payload.detail;
+          } else {
+            state.tasks.unshift(payload);
+          }
+          state.conversation.push({
+            type: "task",
+            ...payload
+          });
+          renderMessages();
+        }
         break;
       case ServerEvent.ASSISTANT_ERROR:
+        state.conversation.push({
+          type: "error",
+          message: payload.message
+        });
+        renderMessages();
         break;
       case ServerEvent.CAPTURE_PHOTO_REQUEST:
         handleCapturePhoto(payload.text);
@@ -382,6 +414,15 @@ function connectGateway() {
 
   ws.addEventListener("close", () => {
     state.ws = null;
+    if (state.sessionActive) {
+      state.sessionActive = false;
+      state.sessionState = SessionState.IDLE;
+      startButton.disabled = false;
+      stopButton.disabled = true;
+      photoButton.disabled = true;
+      stopMedia();
+      renderStatus("连接已断开");
+    }
   });
 
   state.ws = ws;
@@ -414,26 +455,31 @@ function formatTiming(timing) {
     return "";
   }
 
-  const { asrMs, agentMs, ttsMs, totalMs, ttfrMs } = timing;
+  const { asrMs, agentMs, ttsMs, totalMs, ttftMs, ttfaMs } = timing;
   const cls = (ms) => (ms < 500 ? "good" : ms < 1500 ? "warn" : "bad");
 
   const parts = [];
-  if (ttfrMs != null) {
-    parts.push(`<span class="segment ttfr">🎯 首响 ${ttfrMs}ms</span>`);
+  if (ttftMs != null) {
+    parts.push(`<span class="segment ttfr">📝 文字首响 ${ttftMs}ms</span>`);
+  }
+  if (ttfaMs != null) {
+    parts.push(`<span class="segment ttfa">🔊 语音首响 ${ttfaMs}ms</span>`);
+  }
+  if (ttftMs != null || ttfaMs != null) {
     parts.push(`<span class="arrow">|</span>`);
   }
   if (asrMs > 0) {
     parts.push(
-      `<span class="segment ${cls(asrMs)}">ASR ${asrMs}ms</span>`,
+      `<span class="segment ${cls(asrMs)}">🎙️ ASR时延 ${asrMs}ms</span>`,
       `<span class="arrow">→</span>`
     );
   }
   parts.push(
-    `<span class="segment ${cls(agentMs)}">Agent ${agentMs}ms</span>`,
+    `<span class="segment ${cls(agentMs)}">🧠 Agent时延 ${agentMs}ms</span>`,
     `<span class="arrow">→</span>`,
-    `<span class="segment ${cls(ttsMs)}">TTS ${ttsMs}ms</span>`,
+    `<span class="segment ${cls(ttsMs)}">🔊 TTS时延 ${ttsMs}ms</span>`,
     `<span class="arrow">=</span>`,
-    `<span class="segment ${cls(totalMs)}">总计 ${totalMs}ms</span>`
+    `<span class="segment ${cls(totalMs)}">端到端总计 ${totalMs}ms</span>`
   );
   return parts.join(" ");
 }
@@ -520,6 +566,25 @@ function renderMessages() {
         return `
           <div class="message-bubble user">
             <p class="msg-text">${escapeHtml(item.text)}</p>
+          </div>
+        `;
+      }
+
+      if (item.type === "task") {
+        const statusIcon = item.status === "running" ? "⏳" : item.status === "completed" ? "✅" : item.status === "blocked" ? "🚫" : "❌";
+        return `
+          <div class="message-bubble task">
+            <span class="task-status">${statusIcon} ${escapeHtml(item.title)}</span>
+            <p class="task-detail">${escapeHtml(item.detail || "")}</p>
+          </div>
+        `;
+      }
+
+      if (item.type === "error") {
+        return `
+          <div class="message-bubble error">
+            <span class="error-icon">⚠️</span>
+            <p class="msg-text">${escapeHtml(item.message)}</p>
           </div>
         `;
       }
@@ -743,17 +808,16 @@ function stopMedia() {
 async function handleStart() {
   await startMedia();
   await startAudioStreaming();
-  state.sessionActive = true;
-  state.sessionState = SessionState.LISTENING;
-  startButton.disabled = true;
-  stopButton.disabled = false;
-  photoButton.disabled = false;
-  renderStatus("正在聆听…");
   send({
     type: ClientEvent.SESSION_START,
     sessionId,
     userId
   });
+  state.sessionState = SessionState.LISTENING;
+  startButton.disabled = true;
+  stopButton.disabled = false;
+  photoButton.disabled = false;
+  renderStatus("正在聆听…");
 }
 
 function handleStop() {

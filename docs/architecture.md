@@ -38,7 +38,9 @@ flowchart LR
 - Python service built on FastAPI.
 - Handles default Q&A, web search, and image understanding.
 - Returns concise speech text plus full display text via SSE streaming.
+- Provides `/speech` endpoint for LLM-based speech text generation (ack/result/chat contexts).
 - Persistent user profile per userId.
+- All prompts hardcoded in `DEFAULT_PROMPT_*` constants (no `.env` overrides).
 
 ### `packages/shared`
 
@@ -63,6 +65,7 @@ idle → listening → thinking → speaking → listening
 5. `send_feishu_message` is the only ArkClaw-routed intent in v1.
 6. Photo understanding is single-shot only. No realtime video reasoning in v1.
 7. User profile is persisted per userId across sessions.
+8. WebSocket disconnection terminates the current session on both sides; the client stops audio capture and resets UI, requiring manual restart.
 
 ## Delivery Phases
 

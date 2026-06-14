@@ -97,9 +97,22 @@ stop_all() {
     pids=$(lsof -ti "TCP:$port" -sTCP:LISTEN 2>/dev/null || true)
     if [ -n "$pids" ]; then
       for pid in $pids; do
+        kill "$pid" 2>/dev/null || true
+      done
+      log_info "  正在释放端口 $port (PID $pids)..."
+    fi
+  done
+
+  sleep 2
+
+  for port in "${PORTS[@]}"; do
+    local pids
+    pids=$(lsof -ti "TCP:$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      for pid in $pids; do
         kill -9 "$pid" 2>/dev/null || true
       done
-      log_info "  已释放端口 $port (PID $pids)"
+      log_info "  已强制释放端口 $port (PID $pids)"
     fi
   done
 

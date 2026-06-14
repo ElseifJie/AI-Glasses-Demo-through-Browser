@@ -71,22 +71,30 @@ cp .env.example .env
 | 变量 | 用途 |
 |------|------|
 | `OPENAI_API_KEY` | 豆包模型 API Key |
-| `VOLC_ASR_APP_KEY` / `_ACCESS_KEY` | 火山引擎语音识别 |
-| `VOLC_TTS_APP_ID` / `_ACCESS_TOKEN` | 火山引擎语音合成 |
+| `VOLC_ASR_APP_KEY` | 火山引擎语音识别 App Key |
+| `VOLC_ASR_ACCESS_KEY` | 火山引擎语音识别 Access Key |
+| `VOLC_TTS_APP_ID` | 火山引擎语音合成 App ID |
+| `VOLC_TTS_ACCESS_TOKEN` | 火山引擎语音合成 Access Token |
 | `TOOL_WEB_SEARCH_ACCESS_KEY` | 火山引擎联网搜索 |
 
-### 可选项
+### 常用可选
 
 | 变量 | 默认值 | 用途 |
 |------|------|------|
+| `OPENAI_BASE_URL` | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` | 模型 API 地址 |
 | `AGENT_CHAT_MODEL` | `doubao-1-5-lite-32k-250115` | 闲聊、搜索总结 |
 | `AGENT_VISION_MODEL` | `doubao-seed-2-0-mini-260428` | 拍照识别 |
-| `AGENT_PROMPT_CHAT` | 内置默认 | 闲聊提示词 |
-| `AGENT_PROMPT_SEARCH` | 内置默认 | 搜索提示词 |
-| `AGENT_PROMPT_VISION` | 内置默认 | 拍照提示词 |
-| `AGENT_PROMPT_PROFILE` | 内置默认 | 画像提取提示词 |
-| `AGENT_REPLY_FORMAT` | 内置默认 | 回复格式要求 |
 | `GATEWAY_URL` / `_INSTANCE` / `_APIKEY` / `_TOKEN` | — | ArkClaw 终端对接 |
+
+### 高级覆盖
+
+| 变量 | 说明 |
+|------|------|
+| `VOLC_ASR_RESOURCE_ID` | ASR 实例资源 ID |
+| `VOLC_ASR_URL` | ASR 服务地址覆盖 |
+| `VOLC_TTS_RESOURCE_ID` | TTS 实例资源 ID |
+| `VOLC_TTS_VOICE_TYPE` | TTS 音色类型 |
+| `VOLC_TTS_URL` | TTS 服务地址覆盖 |
 
 ## 目录结构
 
@@ -109,7 +117,7 @@ scripts/
 - **语音拍照** — 说「拍照」「这是什么」自动触发拍照
 - **联网搜索** — 说「搜索最新新闻」「北京天气」自动联网
 - **飞书操作** — 说「发消息」「查看日程」「创建文档」调用 ArkClaw
-- **历史记录** — 点击「📋 历史记录」查看完整对话和时延链路
+- **本地调试** — 点击「📋 历史记录」查看对话回溯和时延诊断面板
 
 ## 本地数据
 

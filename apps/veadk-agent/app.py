@@ -39,15 +39,43 @@ SESSION_TTL_SECONDS = 1800
 SENTENCE_END = ("。", "！", "？", "\n\n")
 
 DEFAULT_PROMPT_CHAT = (
-    "你是 AI 眼镜助手，一位知识渊博、亲切自然的生活小助理。"
+    "你是 AI 眼镜助手，名字叫小助理。"
     "你可以陪用户聊天、回答问题，也能通过联网搜索获取最新信息。"
-    "回复风格自然、简洁、有温度，像朋友对话一样。"
-    "\n\n你了解用户以下信息，请在回复中自然地体现出来，但不要刻意复述：\n{user_profile}"
+    "回复风格：简洁、直接、自然，不要刻意寒暄。"
+    "除非用户问了复杂问题，否则一句话回答即可。"
+    "不要给自己起别的名字。"
+    "\n\n你了解用户以下信息，但仅在相关时自然提及，不要生硬复述：\n{user_profile}"
 )
 DEFAULT_PROMPT_SEARCH = (
     "你是 AI 眼镜助手，具备联网搜索能力。"
     "请根据搜索结果给出准确、简洁、自然的中文答复。"
 )
+DEFAULT_PROMPT_SPEECH_ACK = (
+    "你是 AI 眼镜助手。用户刚才说了一段话，需要你去执行一个飞书任务。"
+    "请用一句话简短自然地告诉用户：已收到任务，请稍等，完成后马上通知你。"
+    "必须明确表达\"请稍候\"或\"稍等\"的意思，让用户知道你正在处理。"
+    "不要寒暄，不要加\"好的\"、\"没问题\"之类的前缀，直接说核心内容。"
+    "示例：\"收到，帮你创建日程，稍等片刻，完成后通知你。\""
+    "\n用户原话：{user_text}\n任务类型：{task_label}"
+)
+
+DEFAULT_PROMPT_SPEECH_RESULT = (
+    "你是 AI 眼镜助手。用户之前让你执行了一个飞书任务，现在任务已完成。"
+    "请用一句话简短自然地告诉用户任务已完成。"
+    "不要寒暄，不要加\"好的\"、\"没问题\"之类的前缀，直接说核心内容。"
+    "示例：\"日程已创建好了。\""
+    "\n任务类型：{task_label}\n执行结果：{status}"
+    "\n请输出一句话（20字以内）："
+)
+
+DEFAULT_PROMPT_SPEECH_CHAT = (
+    "你是 AI 眼镜助手。以下是你的完整回答，但语音播报需要简短提炼。"
+    "请把以下回答浓缩成 1-2 句适合语音播报的话，保留核心信息，去掉寒暄和冗余细节。"
+    "不要加前缀，直接说核心内容。"
+    "\n完整回答：\n{full_text}"
+    "\n请输出简短播报（40字以内）："
+)
+
 DEFAULT_PROMPT_VISION = (
     "你是 AI 眼镜助手，负责理解用户刚拍摄的图片。"
     "用一句简短的话描述画面中最重要的内容（适合语音播报），"
@@ -55,8 +83,9 @@ DEFAULT_PROMPT_VISION = (
 )
 DEFAULT_REPLY_FORMAT = (
     "当前时间: {current_date} 周{current_weekday} {current_time}。\n"
-    "回复要求: 适合语音播报的简短句子开头（用于 TTS），"
-    "再用 1-3 句补充完整信息。全文控制在 150 字以内。"
+    "回复要求: 适合语音播报。一句话能说清的绝不两句。"
+    "全文控制在 80 字以内。"
+    "不要加\u201c好的\u201d、\u201c没问题\u201d、\u201c当然可以\u201d之类的寒暄前缀，直接说核心内容。"
 )
 
 URL_PATTERN = re.compile(r"https?://[^\s，。！？\n]+")
@@ -72,7 +101,10 @@ DEFAULT_PROMPT_PROFILE = (
     "1. 仅当用户明确提及才提取，不要推测\n"
     "2. 新信息与旧信息不冲突时，合并保留\n"
     "3. 新信息与旧信息冲突时，以新信息为准\n"
-    "4. 特殊字段 memories：列表，存储用户提到的关键事件，去重后保留最近 20 条\n"
+    "4. 特殊字段 memories：列表，仅存储用户中长期不变或极少变化的事实信息，"
+    "例如：职业、学历、居住地、家庭成员、宠物、过敏史、饮食偏好等。"
+    "不要记录临时性、一次性的事件（如\u201c今天要出门\u201d、\u201c刚才吃了什么\u201d、\u201c准备去开会\u201d等），"
+    "这些不需要长期记忆。去重后保留最近 20 条。\n"
     "5. 其他字段：字符串或数字，如用户未提及则保留原值或省略\n"
     "\n输出 JSON（不要输出其他内容）：\n"
     '{"memories": [...], "任意字段名": "值", ...}'
@@ -170,6 +202,13 @@ class ChatRequest(BaseModel):
     imageDataUrl: str | None = None
 
 
+class SpeechRequest(BaseModel):
+    userText: str
+    taskLabel: str = ""
+    context: str = "ack"
+    status: str = "completed"
+
+
 class OpenAICompatibleClient:
     def __init__(self) -> None:
         self.api_base = (
@@ -191,11 +230,14 @@ class OpenAICompatibleClient:
         self.user_profiles: dict[str, Any] = _load_user_profiles()
         self._http = httpx.AsyncClient(timeout=60)
 
-        self.prompt_chat = os.getenv("AGENT_PROMPT_CHAT") or DEFAULT_PROMPT_CHAT
-        self.prompt_search = os.getenv("AGENT_PROMPT_SEARCH") or DEFAULT_PROMPT_SEARCH
-        self.prompt_vision = os.getenv("AGENT_PROMPT_VISION") or DEFAULT_PROMPT_VISION
-        self.prompt_profile = os.getenv("AGENT_PROMPT_PROFILE") or DEFAULT_PROMPT_PROFILE
-        self.reply_format = os.getenv("AGENT_REPLY_FORMAT") or DEFAULT_REPLY_FORMAT
+        self.prompt_chat = DEFAULT_PROMPT_CHAT
+        self.prompt_search = DEFAULT_PROMPT_SEARCH
+        self.prompt_vision = DEFAULT_PROMPT_VISION
+        self.prompt_profile = DEFAULT_PROMPT_PROFILE
+        self.reply_format = DEFAULT_REPLY_FORMAT
+        self.prompt_speech_ack = DEFAULT_PROMPT_SPEECH_ACK
+        self.prompt_speech_result = DEFAULT_PROMPT_SPEECH_RESULT
+        self.prompt_speech_chat = DEFAULT_PROMPT_SPEECH_CHAT
 
         self._completion_url = (
             self.api_base if self.api_base.endswith("/chat/completions")
@@ -248,7 +290,7 @@ class OpenAICompatibleClient:
         if not profile:
             return "暂无用户信息"
 
-        skip_keys = {"memories", "updated_at"}
+        skip_keys = {"memories", "updated_at", "recent_event"}
         lines = []
         for key, value in profile.items():
             if key in skip_keys:
@@ -460,6 +502,36 @@ class OpenAICompatibleClient:
             "displayText": full_display or full_speech,
         }
 
+    async def summarize_speech(self, user_text: str, task_label: str, context: str = "ack", status: str = "completed") -> str:
+        if context == "result":
+            prompt = self.prompt_speech_result
+            prompt = prompt.replace("{task_label}", task_label)
+            prompt = prompt.replace("{status}", status)
+        elif context == "chat":
+            prompt = self.prompt_speech_chat
+            prompt = prompt.replace("{full_text}", user_text)
+        else:
+            prompt = self.prompt_speech_ack
+            prompt = prompt.replace("{user_text}", user_text)
+            prompt = prompt.replace("{task_label}", task_label)
+
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个简短语音播报生成器，只输出一句话，不超过40字。"},
+                {"role": "user", "content": prompt},
+            ]
+            result = await self._create_completion(
+                self.chat_model, messages, max_tokens=128, temperature=0.2
+            )
+            return result.strip() or f"收到，你的{task_label}任务稍等片刻，完成后通知你。"
+        except Exception as exc:
+            logger.warning(f"[speech] summarize failed: {exc}")
+            if context == "result":
+                return f"你的{task_label}任务已完成。"
+            if context == "chat":
+                return user_text[:100]
+            return f"收到，你的{task_label}任务稍等片刻，完成后通知你。"
+
     async def _create_completion(
         self,
         model: str,
@@ -595,6 +667,13 @@ async def chat_stream(request: ChatRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+
+@app.post("/speech")
+async def speech_text(request: SpeechRequest) -> dict[str, str]:
+    text = await agent_client.summarize_speech(
+        request.userText, request.taskLabel, request.context, request.status
+    )
+    return {"speechText": text}
 
 @app.get("/profile/{user_id}")
 async def get_profile(user_id: str) -> dict[str, Any]:

@@ -106,13 +106,16 @@ async function* callVeadkStream(payload) {
   }
 }
 
-async function streamVeadkToClient(ws, payload, { t0, t1 = t0, intent, withTiming = true }) {
-  const turnTtsSessionId = randomUUID();
+async function streamVeadkToClient(ws, payload, { t0, t1 = t0, tAsrStart = t0, intent, withTiming = true }) {
   let tFirstSentenceAgent = null;
   let tFirstSentenceTts = null;
+  let tTtsFirst = null;
+  let tTtsLast = null;
   let allDisplayText = "";
   let allSpeechText = "";
   let sentenceCount = 0;
+
+  const tAgentStart = Date.now();
 
   for await (const sentence of callVeadkStream(payload)) {
     if (sentence.final) {
@@ -129,56 +132,163 @@ async function streamVeadkToClient(ws, payload, { t0, t1 = t0, intent, withTimin
     allDisplayText += sentence.displayText;
     allSpeechText += sentence.speechText;
 
-    const tts = await synthesizeSpeech(sentence.speechText, { sessionId: turnTtsSessionId });
-
     if (sentenceCount === 1) {
-      tFirstSentenceTts = Date.now();
-    }
+      send(ws, {
+        type: ServerEvent.ASSISTANT_RESULT,
+        sessionId: payload.sessionId,
+        route: "veadk",
+        speechText: "",
+        displayText: sentence.displayText,
+        audioBase64: null,
+        audioMimeType: null,
+        meta: { intent, phase: "sentence" },
+        timing: withTiming
+          ? {
+              asrMs: t1 - tAsrStart,
+              agentMs: null,
+              ttsMs: 0,
+              totalMs: tFirstSentenceAgent - t0,
+              ttftMs: tFirstSentenceAgent - t0
+            }
+          : null
+      });
 
-    send(ws, {
-      type: ServerEvent.ASSISTANT_RESULT,
-      sessionId: payload.sessionId,
-      route: "veadk",
-      speechText: sentence.speechText,
-      displayText: sentence.displayText,
-      audioBase64: tts?.audioBase64 || null,
-      audioMimeType: tts?.mimeType || null,
-      meta: { intent, phase: "sentence" },
-      timing: withTiming && sentenceCount === 1
-        ? {
-            asrMs: t1 - t0,
-            agentMs: tFirstSentenceAgent - t1,
-            ttsMs: tFirstSentenceTts - tFirstSentenceAgent,
-            totalMs: tFirstSentenceTts - t0,
-            ttfrMs: tFirstSentenceTts - t0
-          }
-        : null
-    });
+      const tTtsStart = Date.now();
+      tTtsFirst = tTtsStart;
+      const tts = await synthesizeSpeech(sentence.speechText);
+      tFirstSentenceTts = Date.now();
+      tTtsLast = tFirstSentenceTts;
+
+      send(ws, {
+        type: ServerEvent.ASSISTANT_RESULT,
+        sessionId: payload.sessionId,
+        route: "veadk",
+        speechText: sentence.speechText,
+        displayText: "",
+        audioBase64: tts?.audioBase64 || null,
+        audioMimeType: tts?.mimeType || null,
+        meta: { intent, phase: "sentence" },
+        timing: withTiming
+          ? {
+              asrMs: t1 - tAsrStart,
+              agentMs: null,
+              ttsMs: tFirstSentenceTts - tTtsStart,
+              totalMs: tFirstSentenceTts - t0,
+              ttftMs: tFirstSentenceAgent - t0,
+              ttfaMs: tFirstSentenceTts - t0
+            }
+          : null
+      });
+    } else {
+      const tS = Date.now();
+      if (!tTtsFirst) tTtsFirst = tS;
+      const tts = await synthesizeSpeech(sentence.speechText);
+      tTtsLast = Date.now();
+
+      send(ws, {
+        type: ServerEvent.ASSISTANT_RESULT,
+        sessionId: payload.sessionId,
+        route: "veadk",
+        speechText: sentence.speechText,
+        displayText: sentence.displayText,
+        audioBase64: tts?.audioBase64 || null,
+        audioMimeType: tts?.mimeType || null,
+        meta: { intent, phase: "sentence" }
+      });
+    }
   }
 
-  const t3 = Date.now();
-  const t2 = tFirstSentenceAgent || t1;
+  const tEnd = tTtsLast || Date.now();
+
+  const agentMs = withTiming && tFirstSentenceAgent ? tFirstSentenceAgent - tAgentStart : 0;
+  const ttftMs = withTiming && tFirstSentenceAgent ? tFirstSentenceAgent - t0 : null;
+  const ttfaMs = withTiming && tFirstSentenceTts ? tFirstSentenceTts - t0 : null;
+
+  send(ws, {
+    type: ServerEvent.ASSISTANT_RESULT,
+    sessionId: payload.sessionId,
+    route: "veadk",
+    speechText: allSpeechText,
+    displayText: allDisplayText,
+    audioBase64: null,
+    audioMimeType: null,
+    meta: { intent, phase: "final" },
+    timing: {
+      asrMs: withTiming ? t1 - tAsrStart : 0,
+      agentMs,
+      ttsMs: withTiming ? (tTtsLast ? tTtsLast - tTtsFirst : 0) : 0,
+      totalMs: tEnd - t0,
+      ttftMs,
+      ttfaMs
+    }
+  });
 
   return {
     allDisplayText,
     allSpeechText,
     timing: {
-      asrMs: withTiming ? t1 - t0 : 0,
-      agentMs: withTiming ? t2 - t1 : t2 - t0,
-      ttsMs: t3 - t2,
-      totalMs: t3 - t0,
-      ttfrMs: withTiming ? (tFirstSentenceTts ? tFirstSentenceTts - t0 : t3 - t0) : null
+      asrMs: withTiming ? t1 - tAsrStart : 0,
+      agentMs,
+      ttsMs: withTiming ? (tTtsLast ? tTtsLast - tTtsFirst : 0) : 0,
+      totalMs: tEnd - t0,
+      ttftMs,
+      ttfaMs
     }
   };
 }
 
-async function delegateToArkClaw(payload, ws) {
-  const title = "ArkClaw 飞书任务";
+function humanizeTaskLabel(text) {
+  let cleaned = text
+    .replace(/^(再|又|继续)?(帮我|请帮我|麻烦|能不能|可以|能|可不可以)(再|又)?/i, "")
+    .replace(/^(我想|我要|我需要|给我)/i, "")
+    .replace(/[，,。.！!？?]+$/, "")
+    .trim();
+
+  const docMatch = cleaned.match(/创建.{0,6}(文档|doc|飞书文档|飞书doc)/i);
+  if (docMatch) return "创建飞书文档";
+
+  const calMatch = cleaned.match(/创建.{0,6}(日程|日历|事件|calendar|schedule)/i);
+  if (calMatch) return "创建日程";
+
+  const msgMatch = cleaned.match(/(发|发送).{0,4}(消息|信息|飞书|lark)/i);
+  if (msgMatch) return "发送消息";
+
+  const delMatch = cleaned.match(/(删除|移除|取消|撤销).{0,6}(日程|日历|文档|事件|消息)/i);
+  if (delMatch) return `${delMatch[1]}${delMatch[2]}`;
+
+  return "飞书";
+}
+
+async function generateSpeechText(userText, taskLabel, context = "ack", status = "completed") {
+  try {
+    const response = await fetch(`${veadkAgentUrl}/speech`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userText, taskLabel, context, status }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    return data.speechText || `收到，你的${taskLabel}任务稍等片刻，完成后通知你。`;
+  } catch (err) {
+    console.warn("[gateway] speech LLM failed, using fallback:", err.message);
+    return context === "ack"
+      ? `收到，你的${taskLabel}任务稍等片刻，完成后通知你。`
+      : `你的${taskLabel}任务已完成。`;
+  }
+}
+
+async function delegateToArkClaw(payload, ws, taskLabel) {
+  const taskId = randomUUID();
+  const title = `飞书任务：${taskLabel}`;
   console.log(`[gateway] delegateToArkClaw called, text="${(payload.text || "").slice(0, 60)}", sessionId=${payload.sessionId}`);
 
   send(ws, {
     type: ServerEvent.ASSISTANT_TASK,
     sessionId: payload.sessionId,
+    taskId,
     status: "running",
     title,
     detail: "正在将飞书指令发送给 ArkClaw"
@@ -191,11 +301,6 @@ async function delegateToArkClaw(payload, ws) {
     const tArkDone = Date.now();
     console.log(`[gateway] delegateToArkClaw result.status=${result.status}, arkMs=${tArkDone - tArkStart}`);
 
-    if (result.status === "cancelled") {
-      console.log("[gateway] arkclaw task cancelled, not forwarding to frontend");
-      return { speechText: "", displayText: "", arkMs: 0, tArkDone };
-    }
-
     const taskStatus = result.status === "completed" ? "completed" : "blocked";
     let detail = result.detail;
     if (result.status === "pairing-required") {
@@ -204,6 +309,7 @@ async function delegateToArkClaw(payload, ws) {
     send(ws, {
       type: ServerEvent.ASSISTANT_TASK,
       sessionId: payload.sessionId,
+      taskId,
       status: taskStatus,
       title,
       detail
@@ -221,7 +327,9 @@ async function delegateToArkClaw(payload, ws) {
     }
     return {
       speechText:
-        result.status === "completed" ? "飞书任务已经处理完成。" : "ArkClaw 设备还需要配对。",
+        result.status === "completed"
+        ? await generateSpeechText(payload.text, taskLabel, "result", "completed")
+        : "ArkClaw 设备还需要配对。",
       displayText: detail,
       arkMs: tArkDone - tArkStart,
       tArkDone
@@ -230,12 +338,13 @@ async function delegateToArkClaw(payload, ws) {
     send(ws, {
       type: ServerEvent.ASSISTANT_TASK,
       sessionId: payload.sessionId,
+      taskId,
       status: "failed",
       title,
       detail: error.message
     });
     return {
-      speechText: "ArkClaw 任务执行失败。",
+      speechText: await generateSpeechText(payload.text, taskLabel, "result", "failed"),
       displayText: error.message,
       arkMs: 0,
       tArkDone: Date.now()
@@ -244,6 +353,7 @@ async function delegateToArkClaw(payload, ws) {
 }
 
 async function handleUserTranscript(ws, payload) {
+  const tAsrStart = payload.asrAudioStartAt || Date.now();
   const t0 = payload.asrAudioEndAt || Date.now();
   const t1 = payload.receivedAt || Date.now();
   send(
@@ -277,7 +387,10 @@ async function handleUserTranscript(ws, payload) {
       )
     );
 
-    delegateToArkClaw({ ...payload, intent }, ws)
+    const taskLabel = humanizeTaskLabel(payload.text);
+    let tAck = null;
+
+    delegateToArkClaw({ ...payload, intent }, ws, taskLabel)
       .then(async (result) => {
         const session = sessions.get(payload.sessionId);
         if (!session || session.closed || ws.readyState !== WebSocket.OPEN) {
@@ -312,11 +425,12 @@ async function handleUserTranscript(ws, payload) {
           audioMimeType: tts?.mimeType || null,
           meta: { intent, phase: "result" },
           timing: {
-            asrMs: t1 - t0,
+            asrMs: t1 - tAsrStart,
             agentMs: result.arkMs || 0,
             ttsMs: tNow - tTtsStart,
             totalMs: tNow - t0,
-            ttfrMs: tNow - t0
+            ttftMs: tAck !== null ? tAck - t0 : null,
+            ttfaMs: tNow - t0
           }
         });
         console.log("[gateway] arkclaw ASSISTANT_RESULT sent");
@@ -329,22 +443,24 @@ async function handleUserTranscript(ws, payload) {
           createSessionState(SessionState.LISTENING, "Waiting for the next utterance.", payload.sessionId)
         );
       })
-      .catch((error) => {
+      .catch(async (error) => {
         console.error("[gateway] arkclaw rejected:", error.message);
         send(ws, {
           type: ServerEvent.ASSISTANT_RESULT,
           sessionId: payload.sessionId,
           route: "arkclaw",
-          speechText: "飞书任务执行失败。",
+          speechText: await generateSpeechText(payload.text, taskLabel, "result", "failed"),
           displayText: error.message,
           audioBase64: null,
           audioMimeType: null,
           meta: { intent, phase: "error" },
           timing: {
-            asrMs: t1 - t0,
+            asrMs: t1 - tAsrStart,
             agentMs: 0,
             ttsMs: 0,
-            totalMs: Date.now() - t0
+            totalMs: Date.now() - t0,
+            ttftMs: tAck !== null ? tAck - t0 : null,
+            ttfaMs: null
           }
         });
         send(
@@ -357,9 +473,10 @@ async function handleUserTranscript(ws, payload) {
         );
       });
 
-    const comfortText = "收到，正在通过飞书帮你处理，完成后告诉你。";
+    const comfortText = await generateSpeechText(payload.text, taskLabel, "ack");
+    const tTtsAckStart = Date.now();
     const comfortTts = await synthesizeSpeech(comfortText);
-    const tAck = Date.now();
+    tAck = Date.now();
 
     send(ws, {
       type: ServerEvent.ASSISTANT_RESULT,
@@ -371,11 +488,12 @@ async function handleUserTranscript(ws, payload) {
       audioMimeType: comfortTts?.mimeType || null,
       meta: { intent, phase: "ack" },
       timing: {
-        asrMs: t1 - t0,
+        asrMs: t1 - tAsrStart,
         agentMs: 0,
-        ttsMs: tAck - t1,
+        ttsMs: tAck - tTtsAckStart,
         totalMs: tAck - t0,
-        ttfrMs: tAck - t0
+        ttftMs: tAck - t0,
+        ttfaMs: tAck - t0
       }
     });
 
@@ -392,24 +510,12 @@ async function handleUserTranscript(ws, payload) {
   }
 
   try {
-    const result = await streamVeadkToClient(ws, {
+    await streamVeadkToClient(ws, {
       sessionId: payload.sessionId,
       userId: payload.userId || "",
       text: payload.text,
       intent
-    }, { t0, t1, intent });
-
-    send(ws, {
-      type: ServerEvent.ASSISTANT_RESULT,
-      sessionId: payload.sessionId,
-      route: "veadk",
-      speechText: result.allSpeechText,
-      displayText: result.allDisplayText,
-      audioBase64: null,
-      audioMimeType: null,
-      meta: { intent, phase: "final" },
-      timing: result.timing
-    });
+    }, { t0, t1, tAsrStart, intent });
   } catch (error) {
     console.error("[gateway] veadk stream error:", error.message);
     send(ws, {
@@ -422,7 +528,7 @@ async function handleUserTranscript(ws, payload) {
       audioMimeType: null,
       meta: { intent, phase: "final" },
       timing: {
-        asrMs: t1 - t0,
+        asrMs: t1 - tAsrStart,
         agentMs: 0,
         ttsMs: 0,
         totalMs: Date.now() - t0
@@ -454,25 +560,13 @@ async function handlePhotoCapture(ws, payload) {
   }
 
   try {
-    const result = await streamVeadkToClient(ws, {
+    await streamVeadkToClient(ws, {
       sessionId: payload.sessionId,
       userId: session?.userId || payload.userId || "",
       text: photoText,
       imageDataUrl: payload.dataUrl,
       intent: Intent.IMAGE_UNDERSTANDING
-    }, { t0, intent: Intent.IMAGE_UNDERSTANDING, withTiming: true });
-
-    send(ws, {
-      type: ServerEvent.ASSISTANT_RESULT,
-      sessionId: payload.sessionId,
-      route: "veadk",
-      speechText: result.allSpeechText,
-      displayText: result.allDisplayText,
-      audioBase64: null,
-      audioMimeType: null,
-      meta: { intent: Intent.IMAGE_UNDERSTANDING, phase: "final" },
-      timing: result.timing
-    });
+    }, { t0, tAsrStart: t0, intent: Intent.IMAGE_UNDERSTANDING, withTiming: true });
   } catch (error) {
     console.error("[gateway] photo veadk stream error:", error.message);
     send(ws, {
@@ -512,7 +606,8 @@ function createGatewaySession(sessionId, ws, userId) {
     processing: false,
     asrSession: null,
     closed: false,
-    lastAudioChunkAt: 0
+    lastAudioChunkAt: 0,
+    firstAudioChunkAt: 0
   };
 
   if (!volcAsrClient.isConfigured()) {
@@ -563,6 +658,9 @@ function enqueueTranscript(sessionId, ws, text, source) {
     return;
   }
 
+  const capturedFirstAudioAt = session.firstAudioChunkAt || session.lastAudioChunkAt || Date.now();
+  session.firstAudioChunkAt = 0;
+
   session.queue.push({
     type: ClientEvent.TRANSCRIPT_USER,
     sessionId,
@@ -570,6 +668,7 @@ function enqueueTranscript(sessionId, ws, text, source) {
     text: text.trim(),
     source,
     receivedAt: Date.now(),
+    asrAudioStartAt: capturedFirstAudioAt,
     asrAudioEndAt: session.lastAudioChunkAt || Date.now()
   });
   void drainTranscriptQueue(sessionId, ws);
@@ -649,7 +748,11 @@ wss.on("connection", (ws) => {
         case ClientEvent.AUDIO_CHUNK: {
           const session = sessions.get(payload.sessionId);
           if (session) {
-            session.lastAudioChunkAt = Date.now();
+            const now = Date.now();
+            if (!session.firstAudioChunkAt) {
+              session.firstAudioChunkAt = now;
+            }
+            session.lastAudioChunkAt = now;
             session.asrSession?.writeAudio(Buffer.from(payload.audioBase64, "base64"));
           }
           break;
