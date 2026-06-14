@@ -33,4 +33,4 @@ EOF
 fi
 
 source "$activate_script"
-exec python "$AGENT_DIR/app.py"
+exec python3 "$AGENT_DIR/app.py"
