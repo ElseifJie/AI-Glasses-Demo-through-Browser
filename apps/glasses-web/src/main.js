@@ -71,6 +71,7 @@ const state = {
   gainNode: null,
   pcmBuffer: [],
   pcmBufferSize: 0,
+  _sentFirstChunk: false,
   activeAudio: null,
   playbackAudioCtx: null,
   audioQueue: [],
@@ -80,6 +81,10 @@ const state = {
   audioFallbackPlaying: false,
   mediaItems: [],
   albumFilter: "all",
+  albumSelectMode: false,
+  selectedAlbumItems: new Set(),
+  albumRenderedCount: {},
+  _albumLoadingMore: false,
   mediaPreviewUrls: new Map(),
   albumSelectionRequest: null,
   isRecordingVideo: false,
@@ -159,13 +164,21 @@ app.innerHTML = `
           <h2>本地相册</h2>
           <p id="albumModeHint" class="modal-subtitle">浏览本机保存的照片与视频</p>
         </div>
-        <button id="closeAlbum" class="ghost">✕</button>
+        <div class="album-header-actions">
+          <button id="toggleAlbumSelect" class="ghost">管理</button>
+          <button id="closeAlbum" class="ghost">✕</button>
+        </div>
       </div>
       <div class="album-tabs">
         <button data-filter="all" class="album-tab active">全部</button>
         <button data-filter="photo" class="album-tab">照片</button>
         <button data-filter="video" class="album-tab">视频</button>
         <button data-filter="creation" class="album-tab">作品</button>
+      </div>
+      <div id="albumBatchBar" class="album-batch-bar hidden">
+        <button id="selectAllAlbum" class="secondary">全选</button>
+        <span id="albumSelectedCount" class="album-selected-count">已选 0 项</span>
+        <button id="deleteSelectedAlbum" class="danger">删除</button>
       </div>
       <div id="albumList" class="album-list"></div>
     </div>
@@ -196,6 +209,11 @@ const albumListEl = $("#albumList");
 const albumModeHintEl = $("#albumModeHint");
 const cameraLabel = $("#cameraLabel");
 const recordingBadge = $("#recordingBadge");
+const toggleAlbumSelect = $("#toggleAlbumSelect");
+const albumBatchBar = $("#albumBatchBar");
+const selectAllAlbum = $("#selectAllAlbum");
+const albumSelectedCount = $("#albumSelectedCount");
+const deleteSelectedAlbum = $("#deleteSelectedAlbum");
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -345,15 +363,22 @@ function closeHistory() {
 }
 
 function openAlbum() {
+  state.albumSelectMode = false;
+  state.selectedAlbumItems.clear();
+  resetAlbumPagination();
   renderAlbumModal();
   albumModal.classList.remove("hidden");
+  albumListEl.addEventListener("scroll", onAlbumScroll);
 }
 
 function closeAlbum(force = false) {
   if (state.albumSelectionRequest && !force) {
     return;
   }
+  albumListEl.removeEventListener("scroll", onAlbumScroll);
   albumModal.classList.add("hidden");
+  state.albumSelectMode = false;
+  state.selectedAlbumItems.clear();
   // Revoke all preview URLs when album closes to free memory
   for (const url of state.mediaPreviewUrls.values()) {
     URL.revokeObjectURL(url);
@@ -379,79 +404,201 @@ function formatDuration(durationMs) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function renderAlbumModal() {
-  renderAlbumTabs();
-  albumModeHintEl.textContent = state.albumSelectionRequest
-    ? state.albumSelectionRequest.message
-    : "浏览本机保存的照片与视频";
+const ALBUM_PAGE_SIZE = 20;
 
-  const items = state.mediaItems.filter((item) => {
+function getFilteredAlbumItems() {
+  return state.mediaItems.filter((item) => {
     if (state.albumFilter === "all") return true;
     if (state.albumFilter === "creation") return item.kind === "creation";
     return item.kind === state.albumFilter && item.kind !== "creation";
   });
+}
+
+function renderAlbumCard(item) {
+  const previewUrl = getPreviewUrl(item);
+  const isVideo = item.kind === "video" || item.kind === "creation";
+  const meta = isVideo
+    ? `视频 · ${formatDuration(item.durationMs)}`
+    : "照片";
+  const selectionButton = state.albumSelectionRequest && item.kind === "video"
+    ? `<button class="primary album-action" data-action="select" data-id="${item.id}">选择此视频</button>`
+    : "";
+  const selected = state.selectedAlbumItems.has(item.id);
+  const selectCheckbox = state.albumSelectMode
+    ? `<div class="album-card-check ${selected ? "checked" : ""}" data-action="toggle-select" data-id="${item.id}">
+        <span class="album-check-icon">${selected ? "✓" : ""}</span>
+       </div>`
+    : "";
+
+  return `
+    <article class="album-card ${selected ? "album-card-selected" : ""}">
+      <div class="album-preview">
+        ${selectCheckbox}
+        ${
+          isVideo
+            ? `<video src="${previewUrl}" controls preload="metadata"></video>`
+            : `<img src="${previewUrl}" alt="${escapeHtml(item.fileName || item.id)}" />`
+        }
+      </div>
+      <div class="album-card-body">
+        <div class="album-card-meta">
+          <strong>${escapeHtml(item.fileName || item.id)}</strong>
+          <span>${meta}</span>
+          <span>${formatMediaTime(item.createdAt)}</span>
+        </div>
+        <div class="album-card-actions">
+          ${selectionButton}
+          <a class="secondary album-action" href="${previewUrl}" download="${escapeHtml(item.fileName || "capture")}">下载</a>
+          <button class="danger album-action" data-action="delete" data-id="${item.id}">删除</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function resetAlbumPagination() {
+  state.albumRenderedCount[state.albumFilter] = 0;
+  state._albumLoadingMore = false;
+}
+
+function renderAlbumModal() {
+  renderAlbumTabs();
+  updateAlbumBatchBar();
+  albumModeHintEl.textContent = state.albumSelectionRequest
+    ? state.albumSelectionRequest.message
+    : "浏览本机保存的照片与视频";
+
+  toggleAlbumSelect.textContent = state.albumSelectMode ? "完成" : "管理";
+  albumBatchBar.classList.toggle("hidden", !state.albumSelectMode);
+
+  const items = getFilteredAlbumItems();
 
   if (!items.length) {
     albumListEl.innerHTML = '<p class="empty-hint">相册里还没有内容</p>';
     return;
   }
 
-  albumListEl.innerHTML = items.map((item) => {
-    const previewUrl = getPreviewUrl(item);
-    const isVideo = item.kind === "video" || item.kind === "creation";
-    const meta = isVideo
-      ? `视频 · ${formatDuration(item.durationMs)}`
-      : "照片";
-    const selectionButton = state.albumSelectionRequest && item.kind === "video"
-      ? `<button class="primary album-action" data-action="select" data-id="${item.id}">选择此视频</button>`
-      : "";
-    return `
-      <article class="album-card">
-        <div class="album-preview">
-          ${
-            isVideo
-              ? `<video src="${previewUrl}" controls preload="metadata"></video>`
-              : `<img src="${previewUrl}" alt="${escapeHtml(item.fileName || item.id)}" />`
-          }
-        </div>
-        <div class="album-card-body">
-          <div class="album-card-meta">
-            <strong>${escapeHtml(item.fileName || item.id)}</strong>
-            <span>${meta}</span>
-            <span>${formatMediaTime(item.createdAt)}</span>
-          </div>
-          <div class="album-card-actions">
-            ${selectionButton}
-            <a class="secondary album-action" href="${previewUrl}" download="${escapeHtml(item.fileName || "capture")}">下载</a>
-            <button class="danger album-action" data-action="delete" data-id="${item.id}">删除</button>
-          </div>
-        </div>
-      </article>
-    `;
-  }).join("");
+  resetAlbumPagination();
+  albumListEl.scrollTop = 0;
 
-  albumListEl.querySelectorAll("[data-action='delete']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = button.dataset.id;
-      revokePreviewUrl(id);
-      await deleteMediaItem(id);
-      await refreshMediaItems();
-    });
-  });
+  const renderedCount = Math.min(ALBUM_PAGE_SIZE, items.length);
+  state.albumRenderedCount[state.albumFilter] = renderedCount;
 
-  albumListEl.querySelectorAll("[data-action='select']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      try {
-        const item = await getMediaItem(button.dataset.id);
-        if (item) {
-          await submitSelectedVideoForEdit(item);
-        }
-      } catch (error) {
-        state.conversation.push({ type: "error", message: `提交视频失败: ${error.message}` });
-        renderMessages();
-      }
-    });
+  albumListEl.innerHTML = items.slice(0, renderedCount).map(renderAlbumCard).join("");
+
+  if (renderedCount < items.length) {
+    albumListEl.insertAdjacentHTML("beforeend", '<div class="album-load-more" id="albumLoadMore">加载更多…</div>');
+  }
+}
+
+async function loadMoreAlbumItems() {
+  if (state._albumLoadingMore) return;
+
+  const items = getFilteredAlbumItems();
+  const currentCount = state.albumRenderedCount[state.albumFilter] || 0;
+  if (currentCount >= items.length) return;
+
+  state._albumLoadingMore = true;
+  const loadMoreEl = document.getElementById("albumLoadMore");
+  if (loadMoreEl) loadMoreEl.textContent = "加载中…";
+
+  const nextCount = Math.min(currentCount + ALBUM_PAGE_SIZE, items.length);
+  const newItems = items.slice(currentCount, nextCount);
+
+  await new Promise((r) => setTimeout(r, 100));
+
+  if (loadMoreEl) loadMoreEl.remove();
+  albumListEl.insertAdjacentHTML("beforeend", newItems.map(renderAlbumCard).join(""));
+
+  state.albumRenderedCount[state.albumFilter] = nextCount;
+
+  if (nextCount < items.length) {
+    albumListEl.insertAdjacentHTML("beforeend", '<div class="album-load-more" id="albumLoadMore">加载更多…</div>');
+  }
+
+  state._albumLoadingMore = false;
+}
+
+function updateAlbumBatchBar() {
+  if (!state.albumSelectMode) return;
+  const count = state.selectedAlbumItems.size;
+  albumSelectedCount.textContent = `已选 ${count} 项`;
+  selectAllAlbum.textContent = count === getFilteredAlbumItems().length ? "取消全选" : "全选";
+}
+
+function toggleAlbumSelectMode() {
+  state.albumSelectMode = !state.albumSelectMode;
+  state.selectedAlbumItems.clear();
+  albumListEl.removeEventListener("scroll", onAlbumScroll);
+  renderAlbumModal();
+  if (state.albumSelectMode) {
+    albumListEl.addEventListener("scroll", onAlbumScroll);
+  }
+}
+
+function onAlbumScroll() {
+  const { scrollTop, scrollHeight, clientHeight } = albumListEl;
+  if (scrollTop + clientHeight >= scrollHeight - 120) {
+    loadMoreAlbumItems();
+  }
+}
+
+function toggleAlbumItemSelection(id) {
+  if (state.selectedAlbumItems.has(id)) {
+    state.selectedAlbumItems.delete(id);
+  } else {
+    state.selectedAlbumItems.add(id);
+  }
+  updateAlbumBatchBar();
+
+  const card = albumListEl.querySelector(`[data-id="${CSS.escape(id)}"][data-action="toggle-select"]`);
+  if (card) {
+    const article = card.closest(".album-card");
+    const isSelected = state.selectedAlbumItems.has(id);
+    card.classList.toggle("checked", isSelected);
+    card.querySelector(".album-check-icon").textContent = isSelected ? "✓" : "";
+    if (article) article.classList.toggle("album-card-selected", isSelected);
+  }
+}
+
+function selectAllAlbumItems() {
+  const items = getFilteredAlbumItems();
+  const allSelected = state.selectedAlbumItems.size === items.length;
+
+  if (allSelected) {
+    state.selectedAlbumItems.clear();
+  } else {
+    for (const item of items) {
+      state.selectedAlbumItems.add(item.id);
+    }
+  }
+
+  updateAlbumBatchBar();
+
+  albumListEl.querySelectorAll("[data-action='toggle-select']").forEach((checkbox) => {
+    const id = checkbox.dataset.id;
+    const isSelected = state.selectedAlbumItems.has(id);
+    checkbox.classList.toggle("checked", isSelected);
+    checkbox.querySelector(".album-check-icon").textContent = isSelected ? "✓" : "";
+    const article = checkbox.closest(".album-card");
+    if (article) article.classList.toggle("album-card-selected", isSelected);
   });
+}
+
+async function deleteSelectedAlbumItems() {
+  const count = state.selectedAlbumItems.size;
+  if (count === 0) return;
+  if (!confirm(`确定要删除选中的 ${count} 项吗？`)) return;
+
+  const ids = [...state.selectedAlbumItems];
+  for (const id of ids) {
+    revokePreviewUrl(id);
+    await deleteMediaItem(id);
+  }
+  state.selectedAlbumItems.clear();
+  await refreshMediaItems();
+  resetAlbumPagination();
+  renderAlbumModal();
 }
 
 historyButton.addEventListener("click", openHistory);
@@ -469,8 +616,52 @@ albumModal.addEventListener("click", (e) => {
 document.querySelectorAll(".album-tab").forEach((button) => {
   button.addEventListener("click", () => {
     state.albumFilter = button.dataset.filter;
+    state.selectedAlbumItems.clear();
+    resetAlbumPagination();
     renderAlbumModal();
   });
+});
+
+toggleAlbumSelect.addEventListener("click", toggleAlbumSelectMode);
+selectAllAlbum.addEventListener("click", selectAllAlbumItems);
+deleteSelectedAlbum.addEventListener("click", deleteSelectedAlbumItems);
+
+albumListEl.addEventListener("click", async (e) => {
+  const deleteBtn = e.target.closest("[data-action='delete']");
+  if (deleteBtn) {
+    const id = deleteBtn.dataset.id;
+    revokePreviewUrl(id);
+    await deleteMediaItem(id);
+    await refreshMediaItems();
+    resetAlbumPagination();
+    renderAlbumModal();
+    return;
+  }
+
+  const selectBtn = e.target.closest("[data-action='select']");
+  if (selectBtn) {
+    try {
+      const item = await getMediaItem(selectBtn.dataset.id);
+      if (item) {
+        await submitSelectedVideoForEdit(item);
+      }
+    } catch (error) {
+      state.conversation.push({ type: "error", message: `提交视频失败: ${error.message}` });
+      renderMessages();
+    }
+    return;
+  }
+
+  const toggleBtn = e.target.closest("[data-action='toggle-select']");
+  if (toggleBtn) {
+    toggleAlbumItemSelection(toggleBtn.dataset.id);
+    return;
+  }
+
+  if (e.target.closest("#albumLoadMore")) {
+    loadMoreAlbumItems();
+    return;
+  }
 });
 
 messageList.addEventListener("click", async (e) => {
@@ -690,6 +881,9 @@ function connectGateway() {
           photoButton.disabled = false;
           videoButton.disabled = false;
         }
+        if (payload.state === "speaking") {
+          renderStatus("正在回复…");
+        }
         if (payload.state === "idle") {
           state.sessionActive = false;
           startButton.disabled = false;
@@ -699,8 +893,9 @@ function connectGateway() {
         }
         break;
       case ServerEvent.TRANSCRIPT_PARTIAL:
+        if (!payload.text?.trim()) break;
         state.transcript = payload.text;
-        if (state.audioPlaying) {
+        if (state.audioPlaying && payload.text.length > 3) {
           stopAllAudio();
         }
         renderStreamingTranscript(payload.text);
@@ -732,7 +927,16 @@ function connectGateway() {
         let placeholderDedup = false;
 
         if (isSentence) {
+          if (!payload.displayText && !payload.speechText && payload.audioBase64) {
+            playAssistantAudio(payload);
+            break;
+          }
+
           if (!state._streaming) {
+            if (payload.audioBase64) {
+              playAssistantAudio(payload);
+              break;
+            }
             if (payload.meta?.intent === "image_understanding") {
               const placeholderIndex = state.conversation.findIndex(
                 (item) => item.type === "agent" && item._placeholder
@@ -753,7 +957,9 @@ function connectGateway() {
             }
 
             if (!placeholderDedup) {
-              state.conversation.push({ type: "user", text: state.transcript || "(语音输入)" });
+              if (state.transcript) {
+                state.conversation.push({ type: "user", text: state.transcript });
+              }
               state._streaming = {
                 type: "agent",
                 route: payload.route || "veadk",
@@ -787,7 +993,7 @@ function connectGateway() {
             saveHistory({
               time: new Date().toLocaleString("zh-CN"),
               route: payload.route || "veadk",
-              userText: state.transcript || "(语音输入)",
+              userText: state.transcript || "",
               displayText: state._streaming.displayText || "",
               speechText: state._streaming.speechText || "",
               timing: payload.timing || null
@@ -802,7 +1008,9 @@ function connectGateway() {
         }
 
         if (!isResult && !isSelection && !isTaskAck) {
-          state.conversation.push({ type: "user", text: state.transcript || "(语音输入)" });
+          if (state.transcript) {
+            state.conversation.push({ type: "user", text: state.transcript });
+          }
         }
 
         const hasAgentContent = payload.displayText || payload.speechText || payload.audioBase64 || payload.mediaItems?.length;
@@ -827,16 +1035,21 @@ function connectGateway() {
           saveHistory({
             time: new Date().toLocaleString("zh-CN"),
             route: payload.route || "veadk",
-            userText: lastUser?.text || "(语音输入)",
+            userText: lastUser?.text || "",
             displayText: payload.displayText || "",
             speechText: payload.speechText || "",
             timing: payload.timing || null
           });
+          if (payload.mediaItems?.length) {
+            downloadAndSaveCreations(payload.mediaItems).then(() => refreshMediaItems()).catch((err) => {
+              console.error("[glasses-web] auto-save creations failed:", err);
+            });
+          }
         } else if (!isAck && !isSelection && !isTaskAck) {
           saveHistory({
             time: new Date().toLocaleString("zh-CN"),
             route: payload.route || "veadk",
-            userText: state.transcript || "(语音输入)",
+            userText: state.transcript || "",
             displayText: payload.displayText || "",
             speechText: payload.speechText || "",
             timing: payload.timing || null
@@ -1069,7 +1282,7 @@ function stopAllAudio() {
   clearTimeout(state._audioMutedTimer);
   state._audioMutedTimer = setTimeout(() => {
     state._audioMuted = false;
-  }, 3000);
+  }, 500);
   if (state.playbackAudioCtx) {
     state.playbackAudioCtx.close().catch(() => {});
     state.playbackAudioCtx = null;
@@ -1171,7 +1384,10 @@ async function startAudioStreaming() {
       const downsampled = new Float32Array(event.data.data);
       state.pcmBuffer.push(downsampled);
       state.pcmBufferSize += downsampled.length;
-      if (state.pcmBuffer.length === 1 || state.pcmBufferSize >= 2400) {
+      if (!state._sentFirstChunk && state.pcmBufferSize >= 320) {
+        state._sentFirstChunk = true;
+        flushAudioChunk();
+      } else if (state.pcmBufferSize >= 640) {
         flushAudioChunk();
       }
     }
@@ -1203,6 +1419,7 @@ function stopMedia() {
   state.audioContext = null;
   state.pcmBuffer = [];
   state.pcmBufferSize = 0;
+  state._sentFirstChunk = false;
   state.activeAudio?.pause();
   state.activeAudio = null;
 }

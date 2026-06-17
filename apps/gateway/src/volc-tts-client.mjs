@@ -141,7 +141,7 @@ export class VolcTtsClient {
     const format = options.format || "mp3";
     const sampleRate = options.sampleRate || 24000;
     const speechRate = options.speechRate ?? 1;
-    const timeoutMs = options.timeoutMs || 8000;
+    const timeoutMs = options.timeoutMs || 3000;
 
     const body = {
       user: { uid: sessionId },

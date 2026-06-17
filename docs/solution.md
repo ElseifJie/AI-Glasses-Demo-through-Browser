@@ -248,7 +248,7 @@ function downsampleTo16k(samples, sourceRate):
 | 分片大小 | **6,400 bytes**（PCM） / 4,096 bytes（其他） | `chunkPcm()` 函数 |
 | 部分结果回调 | `onPartial(text)` | 实时发送 `transcript.partial` 到前端 |
 | 完整句子回调 | `onUtterance(text)` | 入队 `enqueueTranscript()` |
-| VAD 尾窗 | **800ms** | `end_window_size: 800` |
+| VAD 尾窗 | **400ms** | `end_window_size: 400` |
 | ITN | **启用** | 逆文本归一化（数字、日期等） |
 | 标点 | **启用** | 自动添加标点 |
 
@@ -291,7 +291,7 @@ Flags（4 位低）：
 | 采样率 | **24,000 Hz** | MP3 输出 |
 | 语速 | **1.0**（正常） | 可通过 `speech_rate` 调整 |
 | 音色 | **zh_female_vv_uranus_bigtts** | 中文女声 |
-| 合成超时 | **8,000 ms** | 单句合成超时 |
+| 合成超时 | **3,000 ms** | 单句合成超时 |
 | 连接池 | 单连接复用 + 请求队列 | `_processQueue()` 串行处理 |
 | 请求 Header | `X-Api-App-Id`, `X-Api-Access-Key`, `X-Api-Resource-Id`, `X-Api-Request-Id` | |
 | 二进制协议 | 同 ASR 的 Header 格式 | 事件帧含 eventCode + sessionId |
@@ -623,7 +623,7 @@ send(ws, { type: ASSISTANT_RESULT, phase: "ack", ... });
 | TTS 服务未配置 | `synthesizeSpeech()` 返回 null，前端仅显示文本 |
 | ArkClaw 未配置 | `sendTextCommand()` 抛出异常，返回配置提示 |
 | VeADK 不可达 | 捕获 fetch 异常，返回 "我暂时无法完成这个请求" |
-| TTS 合成超时 | 8s 超时，自动 reject |
+| TTS 合成超时 | 3s 超时，自动 reject |
 | ASR 会话超时 | `finishAndWait(8000)` 8s 超时关闭 |
 | WebSocket 断开 | ws.on("close") 清理 server session，前端自动停止音频采集并恢复 UI，需用户手动重新开始 |
 | 并发 ArkClaw 调用 | `_lock` 互斥，新调用取消旧调用 |

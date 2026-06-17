@@ -181,6 +181,71 @@ ArkClaw task status updates.
 ## Routing Rule v1
 
 - `send_feishu_message` → ArkClaw
+- `edit_video` → ArkClaw (video upload + TOS storage)
+- `video_select` → browser media picker → ArkClaw
 - `take_photo` → browser captures photo → VeADK vision
+- `take_video` → browser video recording
+- `stop_video` → browser stops recording
 - `web_search` → VeADK with web search
 - `general_chat` / `image_understanding` → VeADK
+
+## Additional Events (v2 video features)
+
+### `capture.video.request`
+
+Gateway requests browser to start recording.
+
+```json
+{
+  "type": "capture.video.request",
+  "sessionId": "uuid"
+}
+```
+
+### `stop.video.request`
+
+Gateway requests browser to stop recording.
+
+```json
+{
+  "type": "stop.video.request",
+  "sessionId": "uuid"
+}
+```
+
+### `media.pick.request`
+
+Gateway requests browser to open media picker.
+
+```json
+{
+  "type": "media.pick.request",
+  "sessionId": "uuid",
+  "filter": "video"
+}
+```
+
+### `media.pick.select`
+
+Browser sends selected media items.
+
+```json
+{
+  "type": "media.pick.select",
+  "sessionId": "uuid",
+  "items": [{ "id": "uuid", "name": "video-001.mp4" }]
+}
+```
+
+### `video.edit.selection`
+
+Browser sends video edit selection.
+
+```json
+{
+  "type": "video.edit.selection",
+  "sessionId": "uuid",
+  "videoId": "uuid",
+  "videoName": "video-001.mp4"
+}
+```

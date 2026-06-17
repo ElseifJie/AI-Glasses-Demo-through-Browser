@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
+from contextlib import asynccontextmanager
+
 import httpx
 import uvicorn
 from dotenv import load_dotenv
@@ -37,6 +39,7 @@ USER_PROFILES_PATH = Path(__file__).with_name("memory_store.json")
 MAX_HISTORY_ROUNDS = 3
 SESSION_TTL_SECONDS = 1800
 SENTENCE_END = ("。", "！", "？", "\n\n")
+MIN_YIELD_CHARS = 100
 
 DEFAULT_PROMPT_CHAT = (
     "你是 AI 眼镜助手，名字叫小助理。"
@@ -78,7 +81,9 @@ DEFAULT_PROMPT_SPEECH_CHAT = (
 
 DEFAULT_PROMPT_VISION = (
     "你是 AI 眼镜助手，负责理解用户刚拍摄的图片。"
-    "用一句简短的话描述画面中最重要的内容（适合语音播报），"
+    "如果用户提出了具体问题（如\u201c手上是什么\u201d\u201c这是什么\u201d等），"
+    "只回答与问题直接相关的内容，不要描述画面中用户没问的部分。"
+    "如果用户没有具体问题，用一句简短的话描述画面中最重要的内容（适合语音播报），"
     "再用 2-3 句话补充细节。"
 )
 DEFAULT_REPLY_FORMAT = (
@@ -607,8 +612,9 @@ class OpenAICompatibleClient:
                     if not content:
                         continue
                     buffer += content
-                    if buffer.rstrip().endswith(SENTENCE_END):
-                        yield buffer.strip()
+                    stripped = buffer.rstrip()
+                    if stripped.endswith(SENTENCE_END) or len(stripped) >= MIN_YIELD_CHARS:
+                        yield stripped
                         buffer = ""
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
@@ -653,7 +659,24 @@ class OpenAICompatibleClient:
         return text_body
 
 
-app = FastAPI(title="veadk-agent-service")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("pre-warming doubao API connection ...")
+    try:
+        async for _ in agent_client._create_completion_stream(
+            agent_client.chat_model,
+            [{"role": "user", "content": "1"}],
+            max_tokens=1,
+            temperature=0,
+        ):
+            pass
+        logger.info("pre-warm complete")
+    except Exception as e:
+        logger.warning(f"pre-warm failed (non-fatal): {e}")
+    yield
+
+
+app = FastAPI(title="veadk-agent-service", lifespan=lifespan)
 _load_env_file()
 agent_client = OpenAICompatibleClient()
 

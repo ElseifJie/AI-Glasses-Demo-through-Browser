@@ -20,6 +20,10 @@ const NEEDS_INPUT_PATTERNS = [
   /不能/,
   /没有权限/,
 ];
+
+const HEARTBEAT_PATTERNS = [
+  /^HEARTBEAT_OK\s*$/i,
+];
 const PROTOCOL_VERSION = 3;
 const ROLE = "operator";
 const SCOPES = ["operator.read", "operator.write"];
@@ -435,6 +439,11 @@ export class ArkClawClient {
         return;
       }
       if (payload.state === "final") {
+        const content = payload?.message?.content?.[0]?.text || "";
+        if (HEARTBEAT_PATTERNS.some((p) => p.test(content))) {
+          console.log(`[arkclaw] chat heartbeat ignored, awaiting actual result`);
+          return;
+        }
         this.chatRuns.delete(payload.runId);
         entry.resolve(payload);
       } else if (payload.state === "error") {

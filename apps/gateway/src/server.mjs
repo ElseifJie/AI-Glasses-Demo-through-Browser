@@ -170,6 +170,18 @@ const server = app.listen(port, host, () => {
       console.debug("[gateway] TTS pre-warm skipped:", err.message)
     );
   }
+  setTimeout(() => {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 5000);
+    fetch(`${veadkAgentUrl}/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "prewarm", text: "1", intent: "chat" }),
+      signal: controller.signal
+    }).then((r) => r.body?.cancel()).catch((err) =>
+      console.debug("[gateway] veadk pre-warm skipped:", err.message)
+    );
+  }, 1000);
 });
 
 const wss = new WebSocketServer({ server });
@@ -215,18 +227,35 @@ function sendAssistantResult(ws, payload) {
 }
 
 async function speakAndSendAssistantResult(ws, payload, { sampleRate = 24000 } = {}) {
-  const tts = await synthesizeSpeech(payload.speechText || payload.displayText || "", {
-    format: "mp3",
-    sampleRate
-  });
-
+  // Send text immediately, synthesize TTS asynchronously
   send(ws, {
     type: ServerEvent.ASSISTANT_RESULT,
     route: "gateway",
-    audioBase64: tts?.audioBase64 || null,
-    audioMimeType: tts?.mimeType || null,
+    audioBase64: null,
+    audioMimeType: null,
     timing: null,
     ...payload
+  });
+
+  synthesizeSpeech(payload.speechText || payload.displayText || "", {
+    format: "mp3",
+    sampleRate
+  }).then((tts) => {
+    if (tts?.audioBase64) {
+      send(ws, {
+        type: ServerEvent.ASSISTANT_RESULT,
+        route: "gateway",
+        speechText: payload.speechText || "",
+        displayText: "",
+        audioBase64: tts.audioBase64,
+        audioMimeType: tts.mimeType,
+        timing: null,
+        sessionId: payload.sessionId,
+        meta: { ...payload.meta, phase: "sentence" }
+      });
+    }
+  }).catch((err) => {
+    console.warn("[gateway] speakAndSend TTS failed:", err.message);
   });
 }
 
@@ -309,6 +338,12 @@ async function streamVeadkToClient(ws, payload, { t0, t1 = t0, tAsrStart = t0, i
     sentenceCount++;
     if (sentenceCount === 1) {
       tFirstSentenceAgent = Date.now();
+
+      // Notify frontend we're speaking as soon as first sentence arrives
+      send(
+        ws,
+        createSessionState(SessionState.SPEAKING, "Assistant is speaking.", payload.sessionId)
+      );
     }
 
     allDisplayText += sentence.displayText;
@@ -335,47 +370,52 @@ async function streamVeadkToClient(ws, payload, { t0, t1 = t0, tAsrStart = t0, i
           : null
       });
 
+      // Synthesize TTS asynchronously — don't block the SSE stream
       const tTtsStart = Date.now();
       tTtsFirst = tTtsStart;
-      const tts = await synthesizeSpeech(sentence.speechText);
-      tFirstSentenceTts = Date.now();
-      tTtsLast = tFirstSentenceTts;
-
-      send(ws, {
-        type: ServerEvent.ASSISTANT_RESULT,
-        sessionId: payload.sessionId,
-        route: "veadk",
-        speechText: sentence.speechText,
-        displayText: "",
-        audioBase64: tts?.audioBase64 || null,
-        audioMimeType: tts?.mimeType || null,
-        meta: { intent, phase: "sentence" },
-        timing: withTiming
-          ? {
-              asrMs: t1 - tAsrStart,
-              agentMs: null,
-              ttsMs: tFirstSentenceTts - tTtsStart,
-              totalMs: tFirstSentenceTts - t0,
-              ttftMs: tFirstSentenceAgent - t0,
-              ttfaMs: tFirstSentenceTts - t0
-            }
-          : null
+      synthesizeSpeech(sentence.speechText).then((tts) => {
+        tFirstSentenceTts = Date.now();
+        tTtsLast = tFirstSentenceTts;
+        send(ws, {
+          type: ServerEvent.ASSISTANT_RESULT,
+          sessionId: payload.sessionId,
+          route: "veadk",
+          speechText: sentence.speechText,
+          displayText: "",
+          audioBase64: tts?.audioBase64 || null,
+          audioMimeType: tts?.mimeType || null,
+          meta: { intent, phase: "sentence" },
+          timing: withTiming
+            ? {
+                asrMs: t1 - tAsrStart,
+                agentMs: null,
+                ttsMs: tFirstSentenceTts - tTtsStart,
+                totalMs: tFirstSentenceTts - t0,
+                ttftMs: tFirstSentenceAgent - t0,
+                ttfaMs: tFirstSentenceTts - t0
+              }
+            : null
+        });
+      }).catch((err) => {
+        console.warn("[gateway] TTS sentence 1 failed:", err.message);
       });
     } else {
       const tS = Date.now();
       if (!tTtsFirst) tTtsFirst = tS;
-      const tts = await synthesizeSpeech(sentence.speechText);
-      tTtsLast = Date.now();
-
-      send(ws, {
-        type: ServerEvent.ASSISTANT_RESULT,
-        sessionId: payload.sessionId,
-        route: "veadk",
-        speechText: sentence.speechText,
-        displayText: sentence.displayText,
-        audioBase64: tts?.audioBase64 || null,
-        audioMimeType: tts?.mimeType || null,
-        meta: { intent, phase: "sentence" }
+      synthesizeSpeech(sentence.speechText).then((tts) => {
+        tTtsLast = Date.now();
+        send(ws, {
+          type: ServerEvent.ASSISTANT_RESULT,
+          sessionId: payload.sessionId,
+          route: "veadk",
+          speechText: sentence.speechText,
+          displayText: sentence.displayText,
+          audioBase64: tts?.audioBase64 || null,
+          audioMimeType: tts?.mimeType || null,
+          meta: { intent, phase: "sentence" }
+        });
+      }).catch((err) => {
+        console.warn("[gateway] TTS sentence failed:", err.message);
       });
     }
   }
@@ -404,6 +444,12 @@ async function streamVeadkToClient(ws, payload, { t0, t1 = t0, tAsrStart = t0, i
       ttfaMs
     }
   });
+
+  console.log(
+    `[gateway] timing general_chat done | session=${payload.sessionId.slice(0, 8)} ` +
+    `asr=${t1 - tAsrStart}ms agent=${agentMs}ms tts=${tTtsLast ? tTtsLast - tTtsFirst : 0}ms ` +
+    `total=${tEnd - t0}ms ttft=${ttftMs}ms ttfa=${ttfaMs}ms`
+  );
 
   return {
     allDisplayText,
@@ -562,7 +608,31 @@ async function handleVideoEditUpload({
     fileName
   });
 
-  const arkResult = await arkclawClient.sendTextCommand(command);
+  let arkResult;
+  try {
+    arkResult = await arkclawClient.sendTextCommand(command);
+  } catch (error) {
+    console.error("[gateway] video edit arkclaw failed:", error.message);
+    send(session.ws, {
+      type: ServerEvent.ASSISTANT_TASK,
+      sessionId,
+      taskId: editTaskId,
+      status: "failed",
+      title,
+      detail: error.message
+    });
+    await speakAndSendAssistantResult(session.ws, {
+      sessionId,
+      route: "arkclaw",
+      displayText: `视频剪辑失败：${error.message}`,
+      speechText: "视频剪辑任务处理失败，请稍后重试。",
+      meta: { intent: Intent.EDIT_VIDEO, phase: "error" }
+    });
+    session.pendingVideoEdit = null;
+    session.userId = userId || session.userId;
+    return { uploaded, outputs: [] };
+  }
+
   const taskStatus =
     arkResult.status === "completed" ? "completed" : arkResult.status === "needs-input" ? "blocked" : "failed";
 
@@ -1056,6 +1126,13 @@ async function handleUserTranscript(ws, payload) {
     return;
   }
 
+  const tHandleStart = Date.now();
+  console.log(
+    `[gateway] timing general_chat | session=${payload.sessionId.slice(0, 8)} ` +
+    `asr_ms=${t1 - tAsrStart} queue_ms=${tHandleStart - t1} ` +
+    `text="${payload.text.slice(0, 40)}" intent=${intent}`
+  );
+
   try {
     await streamVeadkToClient(ws, {
       sessionId: payload.sessionId,
@@ -1220,6 +1297,7 @@ function enqueueTranscript(sessionId, ws, text, source) {
 
   const capturedFirstAudioAt = session.firstAudioChunkAt || session.lastAudioChunkAt || Date.now();
   session.firstAudioChunkAt = 0;
+  session.lastAudioChunkAt = 0;
 
   session.queue.push({
     type: ClientEvent.TRANSCRIPT_USER,

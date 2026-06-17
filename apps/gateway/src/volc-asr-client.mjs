@@ -230,7 +230,7 @@ export class VolcAsrSession {
             enable_nonstream: false,
             show_utterances: true,
             result_type: "single",
-            end_window_size: 800
+            end_window_size: 400
           }
         };
         ws.send(this.buildJsonFrame(payload));

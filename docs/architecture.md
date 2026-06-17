@@ -62,7 +62,7 @@ idle → listening → thinking → speaking → listening
 2. Gateway treats ASR VAD segments as utterance boundaries.
 3. Gateway sends only short summary text to TTS (per sentence, streaming).
 4. Full answers and task execution details are rendered in the browser.
-5. `send_feishu_message` is the only ArkClaw-routed intent in v1.
+5. `send_feishu_message` and `edit_video` are routed to ArkClaw.
 6. Photo understanding is single-shot only. No realtime video reasoning in v1.
 7. User profile is persisted per userId across sessions.
 8. WebSocket disconnection terminates the current session on both sides; the client stops audio capture and resets UI, requiring manual restart.
