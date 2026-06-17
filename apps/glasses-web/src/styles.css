@@ -54,6 +54,12 @@ body {
   flex-shrink: 0;
 }
 
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .top-bar h1 {
   font-size: 1.5rem;
   font-weight: 700;
@@ -160,6 +166,23 @@ button:disabled {
   backdrop-filter: blur(8px);
 }
 
+.recording-badge {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(224, 85, 85, 0.92);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(224, 85, 85, 0.3);
+}
+
+.recording-badge.hidden {
+  display: none;
+}
+
 .chat-panel {
   display: flex;
   flex-direction: column;
@@ -183,6 +206,7 @@ button:disabled {
   overflow: hidden;
   backdrop-filter: blur(12px);
   max-height: 40vh;
+  min-height: 220px;
   margin-top: 16px;
 }
 
@@ -294,6 +318,11 @@ button:disabled {
 .role-tag.arkclaw {
   background: rgba(240, 160, 64, 0.15);
   color: var(--warning);
+}
+
+.role-tag.gateway {
+  background: rgba(52, 178, 123, 0.14);
+  color: var(--success);
 }
 
 .message-bubble .msg-text {
@@ -433,6 +462,153 @@ button:disabled {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
 }
 
+.album-modal-content {
+  width: min(960px, calc(100% - 32px));
+}
+
+.modal-subtitle {
+  margin-top: 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.album-tabs {
+  display: flex;
+  gap: 10px;
+  padding: 12px 24px 0;
+}
+
+.album-tab {
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(79, 110, 247, 0.08);
+  color: var(--text-secondary);
+}
+
+.album-tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.album-list {
+  overflow-y: auto;
+  padding: 20px 24px 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.album-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: #fff;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+
+.album-preview {
+  background: #0b1020;
+  aspect-ratio: 4 / 3;
+}
+
+.album-preview img,
+.album-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.album-card-body {
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.album-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.album-card-meta strong {
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+.album-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.album-action {
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  text-decoration: none;
+}
+
+.attachment-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.attachment-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.attachment-card video {
+  width: 100%;
+  display: block;
+  background: #000;
+}
+
+.attachment-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  font-size: 0.8rem;
+}
+
+.attachment-meta a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.save-to-album-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.save-to-album-btn:hover {
+  opacity: 0.85;
+}
+
+.save-to-album-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .modal-header {
   display: flex;
   justify-content: space-between;
@@ -567,6 +743,15 @@ button:disabled {
 }
 
 @media (max-width: 900px) {
+  body {
+    overflow-y: auto;
+  }
+
+  .shell {
+    height: auto;
+    min-height: 100vh;
+  }
+
   .main-area {
     grid-template-columns: 1fr;
   }
@@ -578,6 +763,12 @@ button:disabled {
 
   .chat-panel {
     max-height: 35vh;
+  }
+
+  .conv-log {
+    max-height: none;
+    min-height: 260px;
+    margin-top: 0;
   }
 
   .control-bar {

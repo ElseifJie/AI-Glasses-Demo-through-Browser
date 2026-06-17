@@ -25,7 +25,7 @@ Transport: WebSocket JSON messages.
 
 ### `transcript.user`
 
-> **注意：** 此事件由网关在 ASR 回调后内部合成并入队（[server.mjs `enqueueTranscript()`](file:///Users/bytedance/Desktop/myProgram/AI Glasses Agent and ArkClaw/code/apps/gateway/src/server.mjs#L650)），**浏览器不直接发送**。浏览器仅发送 `audio.chunk` 音频流，ASR 识别完成后由网关自行构造 `transcript.user` 事件推入内部处理管线。烟雾测试中可通过 `source: "smoke-test"` 直接发送此事件以绕过 ASR。
+> **注意：** 此事件由网关在 ASR 回调后内部合成并入队（见 `apps/gateway/src/server.mjs` 中的 `enqueueTranscript()`），**浏览器不直接发送**。浏览器仅发送 `audio.chunk` 音频流，ASR 识别完成后由网关自行构造 `transcript.user` 事件推入内部处理管线。烟雾测试中可通过 `source: "smoke-test"` 直接发送此事件以绕过 ASR。
 
 ```json
 {

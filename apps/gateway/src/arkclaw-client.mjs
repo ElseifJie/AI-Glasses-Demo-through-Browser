@@ -136,6 +136,7 @@ export class ArkClawClient {
       deviceFile: env.DEVICE_FILE || DEFAULT_DEVICE_FILE,
       platform: normalizeAsciiLower(process.platform),
       deviceFamily: normalizeAsciiLower(process.arch),
+      chatTimeoutMs: Number(env.ARKCLAW_CHAT_TIMEOUT_MS) || 1800000,
     };
     this.identity = loadOrCreateIdentity(this.config.deviceFile);
     this.ws = null;
@@ -202,12 +203,11 @@ export class ArkClawClient {
       }
 
       const runId = crypto.randomUUID();
-      const finalResult = this._waitForChatRun(runId);
-      const fullMessage = `请以用户身份（default 模式）执行以下操作，所有创建的文档、日程均以用户的身份创建：\n${text}`;
+      const finalResult = this._waitForChatRun(runId, this.config.chatTimeoutMs);
       console.log(`[arkclaw:${callId}] sending chat.send, runId=${runId}`);
       await this._request("chat.send", {
         sessionKey: this.config.sessionKey,
-        message: fullMessage,
+        message: text,
         idempotencyKey: runId,
       });
       console.log(`[arkclaw:${callId}] chat.send sent, awaiting response`);
@@ -237,6 +237,30 @@ export class ArkClawClient {
     }
   }
 
+  _onConnectionLost() {
+    let rejected = 0;
+    for (const entry of this.chatRuns.values()) {
+      entry.cancel();
+      rejected++;
+    }
+    this.chatRuns.clear();
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timeout);
+      entry.reject(new Error("ArkClaw connection lost"));
+      rejected++;
+    }
+    this.pending.clear();
+    const challengeEntries = this.challengeResolvers.splice(0);
+    for (const entry of challengeEntries) {
+      entry.reject(new Error("ArkClaw connection lost"));
+      rejected++;
+    }
+    this.challengeNonce = null;
+    if (rejected > 0) {
+      console.log(`[arkclaw] connection lost, rejected ${rejected} pending operations`);
+    }
+  }
+
   _resetState() {
     let rejected = 0;
     for (const entry of this.pending.values()) {
@@ -246,8 +270,7 @@ export class ArkClawClient {
     }
     this.pending.clear();
     for (const entry of this.chatRuns.values()) {
-      clearTimeout(entry.timeout);
-      entry.reject(new Error("CANCELLED"));
+      entry.cancel();
       rejected++;
     }
     this.chatRuns.clear();
@@ -285,11 +308,13 @@ export class ArkClawClient {
         ws.on("close", () => {
           if (this.ws === ws) {
             this.ws = null;
+            this._onConnectionLost();
           }
         });
         ws.on("error", () => {
           if (this.ws === ws) {
             this.ws = null;
+            this._onConnectionLost();
           }
         });
         resolve();
@@ -447,21 +472,40 @@ export class ArkClawClient {
     });
   }
 
-  _waitForChatRun(runId, timeoutMs = 120000) {
+  _waitForChatRun(runId, safetyTimeoutMs = 1800000) {
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      let settled = false;
+
+      const safetyTimeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         this.chatRuns.delete(runId);
-        reject(new Error(`timeout waiting for chat run ${runId}`));
-      }, timeoutMs);
+        reject(new Error(`safety timeout waiting for chat run ${runId}`));
+      }, safetyTimeoutMs);
+
+      const cancel = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimeout);
+        reject(new Error(`ArkClaw connection lost while waiting for chat run ${runId}`));
+      };
+
       this.chatRuns.set(runId, {
         resolve: (payload) => {
-          clearTimeout(timeout);
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimeout);
+          this.chatRuns.delete(runId);
           resolve(payload);
         },
         reject: (error) => {
-          clearTimeout(timeout);
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimeout);
+          this.chatRuns.delete(runId);
           reject(error);
         },
+        cancel,
       });
     });
   }

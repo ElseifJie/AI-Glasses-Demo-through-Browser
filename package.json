@@ -10,11 +10,17 @@
     "dev:web": "npm --workspace @ai-glasses/glasses-web run dev",
     "dev:gateway": "npm --workspace @ai-glasses/gateway run dev",
     "dev:veadk": "bash scripts/run-veadk.sh",
+    "dev:frontend": "bash scripts/dev.sh start-frontend",
+    "dev:backend": "bash scripts/dev.sh start-backend",
     "dev:start": "bash scripts/dev.sh start",
+    "dev:frontend:stop": "bash scripts/dev.sh stop-frontend",
+    "dev:backend:stop": "bash scripts/dev.sh stop-backend",
     "dev:stop": "bash scripts/dev.sh stop",
     "dev:status": "bash scripts/dev.sh status",
     "dev:logs": "bash scripts/dev.sh logs",
-    "test:smoke": "node scripts/smoke-test.mjs"
+    "test:intent": "node scripts/test-video-intent.mjs",
+    "test:smoke": "node scripts/smoke-test.mjs",
+    "check:repo": "bash scripts/repo-check.sh"
   },
   "dependencies": {}
 }

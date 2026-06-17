@@ -8,6 +8,7 @@ import { VolcTtsClient } from "../apps/gateway/src/volc-tts-client.mjs";
 const veadkAgentUrl = process.env.VEADK_AGENT_URL || "http://127.0.0.1:9001";
 const gatewayUrl = process.env.GATEWAY_WS_URL || "ws://127.0.0.1:8787";
 const gatewayHealthUrl = process.env.GATEWAY_HTTP_URL || "http://127.0.0.1:8787";
+const webOrigin = process.env.WEB_ORIGIN || "http://localhost:5173";
 const webAppUrl = process.env.WEB_APP_URL || "";
 const sampleImageUrl = "https://portal.volccdn.com/obj/volcfe/misc/favicon.png";
 const volcTtsClient = new VolcTtsClient(process.env);
@@ -130,7 +131,7 @@ async function collectGatewayResult(sendEvents, targetPhase, assertResult) {
   const sessionId = randomUUID();
 
   return await new Promise((resolve, reject) => {
-    const ws = new WebSocket(gatewayUrl);
+    const ws = new WebSocket(gatewayUrl, { headers: { origin: webOrigin } });
     const timeout = setTimeout(() => {
       ws.close();
       reject(new Error("gateway websocket test timed out"));
@@ -180,6 +181,104 @@ async function collectGatewayResult(sendEvents, targetPhase, assertResult) {
       reject(error);
     });
   });
+}
+
+async function collectGatewayEvent(sendEvents, expectedType, assertPayload) {
+  const sessionId = randomUUID();
+
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(gatewayUrl, { headers: { origin: webOrigin } });
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error(`gateway websocket test timed out waiting for ${expectedType}`));
+    }, 30_000);
+
+    const cleanup = () => clearTimeout(timeout);
+
+    ws.on("open", () => {
+      for (const event of sendEvents(sessionId)) {
+        ws.send(JSON.stringify(event));
+      }
+    });
+
+    ws.on("message", (buffer) => {
+      const payload = JSON.parse(buffer.toString());
+      if (payload.sessionId !== sessionId) {
+        return;
+      }
+
+      if (payload.type === "assistant.error") {
+        cleanup();
+        ws.close();
+        reject(new Error(payload.message));
+        return;
+      }
+
+      if (payload.type === "capture.video.request") {
+        cleanup();
+        ws.close();
+        reject(new Error("video edit intent was incorrectly routed to TAKE_VIDEO"));
+        return;
+      }
+
+      if (payload.type === expectedType) {
+        try {
+          assertPayload(payload);
+          cleanup();
+          ws.close();
+          resolve(payload);
+        } catch (error) {
+          cleanup();
+          ws.close();
+          reject(error);
+        }
+      }
+    });
+
+    ws.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+  });
+}
+
+async function testGatewayVideoEdit(text) {
+  const payload = await collectGatewayEvent(
+    (sessionId) => [
+      { type: "session.start", sessionId },
+      { type: "transcript.user", sessionId, text, source: "smoke-test" }
+    ],
+    "media.pick.request",
+    (result) => {
+      if (result.type !== "media.pick.request") {
+        throw new Error(`expected media.pick.request, got ${result.type}`);
+      }
+      if (result.mediaType !== "video") {
+        throw new Error(`expected mediaType video, got ${result.mediaType}`);
+      }
+    }
+  );
+
+  log(`[pass] gateway video edit "${text}" -> media.pick.request`);
+  return payload;
+}
+
+async function testGatewayVideoEditNoTos(text) {
+  const payload = await collectGatewayEvent(
+    (sessionId) => [
+      { type: "session.start", sessionId },
+      { type: "transcript.user", sessionId, text, source: "smoke-test" }
+    ],
+    "assistant.result",
+    (result) => {
+      if (result.meta?.phase !== "result") {
+        throw new Error(`expected phase result, got ${result.meta?.phase}`);
+      }
+    }
+  );
+
+  log(`[pass] gateway video edit "${text}" -> assistant.result (no TOS or ambiguous)`);
+  return payload;
 }
 
 async function testGatewayChat() {
@@ -288,6 +387,21 @@ async function main() {
   await testGatewayChat();
   await testGatewayImage();
   await testGatewayArkClaw();
+
+  const videoEditCases = [
+    "帮我剪辑视频",
+    "剪辑我录的视频",
+    "剪一下录的视频",
+    "帮我剪一下这个视频"
+  ];
+
+  for (const text of videoEditCases) {
+    try {
+      await testGatewayVideoEdit(text);
+    } catch {
+      await testGatewayVideoEditNoTos(text);
+    }
+  }
 
   log("[done] smoke tests passed");
 }

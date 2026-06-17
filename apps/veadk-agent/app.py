@@ -227,6 +227,7 @@ class OpenAICompatibleClient:
         self.session_user_map: dict[str, str] = {}
         self._session_atimes: dict[str, float] = {}
         self._profile_tasks: set[asyncio.Task[None]] = set()
+        self._profile_timers: dict[str, asyncio.Task[None]] = {}
         self.user_profiles: dict[str, Any] = _load_user_profiles()
         self._http = httpx.AsyncClient(timeout=60)
 
@@ -247,9 +248,23 @@ class OpenAICompatibleClient:
     def _schedule_profile_update(self, user_id: str, user_text: str) -> None:
         if not user_id or not user_text:
             return
-        task = asyncio.create_task(self._update_profile(user_id, user_text))
-        self._profile_tasks.add(task)
-        task.add_done_callback(self._profile_tasks.discard)
+        
+        # Cancel any pending update for this user
+        existing = self._profile_timers.get(user_id)
+        if existing and not existing.done():
+            existing.cancel()
+        
+        # Debounce: wait 5 seconds before actually updating
+        async def _debounced():
+            try:
+                await asyncio.sleep(5)
+                await self._update_profile(user_id, user_text)
+            except asyncio.CancelledError:
+                pass
+        
+        task = asyncio.create_task(_debounced())
+        self._profile_timers[user_id] = task
+        task.add_done_callback(lambda t: self._profile_timers.pop(user_id, None))
 
     def _cleanup_stale_sessions(self) -> None:
         now = asyncio.get_event_loop().time()

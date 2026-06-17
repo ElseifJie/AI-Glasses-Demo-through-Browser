@@ -11,7 +11,8 @@ export const ClientEvent = Object.freeze({
   SESSION_STOP: "session.stop",
   TRANSCRIPT_USER: "transcript.user",
   AUDIO_CHUNK: "audio.chunk",
-  PHOTO_CAPTURE: "photo.capture"
+  PHOTO_CAPTURE: "photo.capture",
+  VIDEO_EDIT_SELECTION: "video.edit.selection"
 });
 
 export const ServerEvent = Object.freeze({
@@ -20,7 +21,11 @@ export const ServerEvent = Object.freeze({
   ASSISTANT_RESULT: "assistant.result",
   ASSISTANT_TASK: "assistant.task",
   ASSISTANT_ERROR: "assistant.error",
-  CAPTURE_PHOTO_REQUEST: "capture.photo.request"
+  CAPTURE_PHOTO_REQUEST: "capture.photo.request",
+  CAPTURE_VIDEO_REQUEST: "capture.video.request",
+  STOP_VIDEO_REQUEST: "stop.video.request",
+  MEDIA_PICK_REQUEST: "media.pick.request",
+  MEDIA_PICK_SELECT: "media.pick.select"
 });
 
 export const Intent = Object.freeze({
@@ -28,7 +33,11 @@ export const Intent = Object.freeze({
   SEND_FEISHU_MESSAGE: "send_feishu_message",
   IMAGE_UNDERSTANDING: "image_understanding",
   WEB_SEARCH: "web_search",
-  TAKE_PHOTO: "take_photo"
+  TAKE_PHOTO: "take_photo",
+  TAKE_VIDEO: "take_video",
+  STOP_VIDEO: "stop_video",
+  EDIT_VIDEO: "edit_video",
+  VIDEO_SELECT: "video_select"
 });
 
 const FEISHU_PATTERNS = [
@@ -71,12 +80,89 @@ const SEARCH_PATTERNS = [
   /what.*today/i,
 ];
 
+const VIDEO_EDIT_PATTERNS = [
+  /视频剪辑/,
+  /剪辑视频/,
+  /(帮我|给我|来|我要|请|帮忙).*剪辑/,
+  /剪辑.*(视频|一下|这个|那个)/,
+  /剪一下/,
+  /帮我剪/,
+  /剪个vlog/i,
+  /vlog剪辑/i,
+  /剪成vlog/i,
+  /做个vlog/i,
+  /video edit/i,
+  /edit.*video/i,
+  /highlight.*(video|reel|clip)/i,
+  /create.*highlight/i,
+];
+
+export const VIDEO_SELECT_PATTERNS = [
+  /^第.{1,3}个/,
+  /^选.{1,3}个/,
+  /^就.{0,3}个/,
+  /^这个/,
+  /^那个/,
+  /^选这个/,
+  /^选那个/,
+  /^就这个/,
+  /^就那个/,
+  /^要这个/,
+  /^要那个/,
+  /^第一个/,
+  /^第二个/,
+  /^第三个/,
+  /^第四个/,
+  /^第五个/,
+  /^最新的/,
+  /^最后的/,
+  /^最近.*那个/,
+  /^刚才.*那个/,
+  /^最长的/,
+  /^最短的/,
+  /^最新的一个/,
+  /^最后的一个/,
+  /^选.*\.mp4/i,
+  /^选.*\.mov/i,
+  /^选.*\.webm/i,
+];
+
+const VIDEO_PATTERNS = [
+  /拍.{0,3}视频/,
+  /录.{0,3}视频/,
+  /录制/,
+  /录一段/,
+  /拍一段/,
+  /录像/,
+  /开始录/,
+  /录个vlog/i,
+  /shoot.*video/i,
+  /record.*video/i,
+  /take.*video/i,
+];
+
+const STOP_VIDEO_PATTERNS = [
+  /停止录制/,
+  /停止录像/,
+  /停止拍摄/,
+  /结束录制/,
+  /结束录像/,
+  /结束拍摄/,
+  /别录了/,
+  /不要录了/,
+  /停一下录制/,
+  /stop.*record/i,
+  /stop.*video/i,
+];
+
 const PHOTO_PATTERNS = [
   /拍照/,
   /拍拍/,
   /拍张/,
+  /拍.*照片/,
   /拍一下/,
   /拍个/,
+  /拍一张/,
   /这是什么/,
   /那是什么/,
   /眼前.*什么/,
@@ -110,8 +196,20 @@ export function detectIntent(text = "", hasImage = false) {
     return Intent.IMAGE_UNDERSTANDING;
   }
 
+  if (VIDEO_EDIT_PATTERNS.some((pattern) => pattern.test(text))) {
+    return Intent.EDIT_VIDEO;
+  }
+
   if (FEISHU_PATTERNS.some((pattern) => pattern.test(text))) {
     return Intent.SEND_FEISHU_MESSAGE;
+  }
+
+  if (STOP_VIDEO_PATTERNS.some((pattern) => pattern.test(text))) {
+    return Intent.STOP_VIDEO;
+  }
+
+  if (VIDEO_PATTERNS.some((pattern) => pattern.test(text))) {
+    return Intent.TAKE_VIDEO;
   }
 
   if (PHOTO_PATTERNS.some((pattern) => pattern.test(text))) {

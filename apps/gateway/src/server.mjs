@@ -8,36 +8,191 @@ import {
   SessionState,
   Intent,
   createSessionState,
-  detectIntent
+  detectIntent,
+  VIDEO_SELECT_PATTERNS
 } from "@ai-glasses/shared";
 import { ArkClawClient } from "./arkclaw-client.mjs";
+import { GatewayTosClient } from "./tos-client.mjs";
+import {
+  buildVideoEditCommand,
+  buildVideoSelectionPrompt,
+  extractRequestedVideoName,
+  isVideoEditDescriptionAmbiguous
+} from "./video-editing.mjs";
+import { rewriteForArkClaw, rewriteArkClawFollowUp } from "./intent-rewriter.mjs";
 import { VolcAsrClient } from "./volc-asr-client.mjs";
 import { VolcTtsClient } from "./volc-tts-client.mjs";
 
 const port = Number(process.env.PORT || 8787);
+const host = process.env.HOST || "127.0.0.1";
 const veadkAgentUrl = process.env.VEADK_AGENT_URL || "http://127.0.0.1:9001";
+const allowedOrigins = (process.env.WEB_ORIGIN || "")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 const arkclawClient = new ArkClawClient(process.env);
+const tosClient = new GatewayTosClient(process.env);
 const volcAsrClient = new VolcAsrClient(process.env);
 const volcTtsClient = new VolcTtsClient(process.env);
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowAnyOrigin = allowedOrigins.length === 0;
+  const allowOrigin = allowAnyOrigin || (origin && allowedOrigins.includes(origin));
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "gateway" });
+  if (allowOrigin && origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Session-Id, X-User-Id, X-Original-Text, X-File-Name, X-Asset-Id, X-Request-Id"
+  );
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  next();
 });
 
-const server = app.listen(port, () => {
-  console.log(`[gateway] listening on http://127.0.0.1:${port}`);
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "gateway",
+    host,
+    port,
+    allowedOrigins,
+    videoEditing: {
+      tosConfigured: tosClient.isConfigured()
+    }
+  });
+});
+
+app.get("/api/tos/proxy", async (req, res) => {
+  const url = req.query.url;
+  if (!url) {
+    return res.status(400).json({ error: "Missing url parameter" });
+  }
+  try {
+    const parsed = new URL(url);
+    const allowedHosts = [
+      /\.tos-.*\.volces\.com$/,
+      /\.tos-cn-.*\.ivolces\.com$/,
+      /\.volces\.com$/,
+    ];
+    if (!allowedHosts.some((pattern) => pattern.test(parsed.hostname))) {
+      console.error("[gateway] TOS proxy blocked non-TOS URL:", parsed.hostname);
+      return res.status(403).json({ error: "Only TOS URLs are allowed" });
+    }
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.error("[gateway] TOS proxy fetch failed:", response.status, url);
+      return res.status(response.status).json({ error: "TOS download failed" });
+    }
+    const contentType = response.headers.get("content-type") || "application/octet-stream";
+    const contentLength = response.headers.get("content-length");
+    res.setHeader("Content-Type", contentType);
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    const buffer = await response.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (error) {
+    console.error("[gateway] TOS proxy error:", error.message);
+    res.status(500).json({ error: "TOS proxy error" });
+  }
+});
+
+app.post(
+  "/api/videos/edit-source",
+  express.raw({ type: () => true, limit: "200mb" }),
+  async (req, res) => {
+    const sessionId = String(req.headers["x-session-id"] || "").trim();
+    try {
+      const userId = String(req.headers["x-user-id"] || "").trim();
+      const originalText = decodeURIComponent(String(req.headers["x-original-text"] || "").trim());
+      const fileName = decodeURIComponent(String(req.headers["x-file-name"] || "capture.mp4").trim());
+      const assetId = String(req.headers["x-asset-id"] || "").trim();
+      const requestId = String(req.headers["x-request-id"] || "").trim();
+
+      if (!sessionId || !originalText) {
+        res.status(400).json({ ok: false, message: "sessionId and originalText are required." });
+        return;
+      }
+
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(400).json({ ok: false, message: "video body is empty." });
+        return;
+      }
+
+      const result = await handleVideoEditUpload({
+        sessionId,
+        userId,
+        originalText,
+        fileName,
+        assetId,
+        requestId,
+        contentType: req.headers["content-type"] || "video/mp4",
+        buffer: req.body
+      });
+
+      res.json({
+        ok: true,
+        uploaded: result.uploaded,
+        outputs: result.outputs
+      });
+    } catch (error) {
+      console.error("[gateway] video edit upload failed:", error);
+      const session = sessions.get(sessionId);
+      if (session?.ws?.readyState === WebSocket.OPEN) {
+        send(session.ws, {
+          type: ServerEvent.ASSISTANT_ERROR,
+          sessionId,
+          message: `视频上传或剪辑失败: ${error.message}`
+        });
+      }
+      res.status(500).json({ ok: false, message: error.message });
+    }
+  }
+);
+
+const server = app.listen(port, host, () => {
+  console.log(`[gateway] listening on http://${host}:${port}`);
   if (volcTtsClient.isConfigured()) {
-    synthesizeSpeech("。").catch((err) =>
-      console.warn("[gateway] TTS pre-warm failed:", err.message)
+    synthesizeSpeech("你好").catch((err) =>
+      console.debug("[gateway] TTS pre-warm skipped:", err.message)
     );
   }
 });
 
 const wss = new WebSocketServer({ server });
 const sessions = new Map();
+
+const SESSION_MAX_IDLE_MS = 10 * 60 * 1000; // 10 minutes
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of sessions.entries()) {
+    if (session.closed) {
+      sessions.delete(sessionId);
+      continue;
+    }
+    const idleMs = now - Math.max(session.lastAudioChunkAt || 0, session.createdAt || 0);
+    if (idleMs > SESSION_MAX_IDLE_MS) {
+      console.log(`[gateway] cleaning up idle session ${sessionId}, idle=${idleMs}ms`);
+      closeSession(sessionId).catch((err) =>
+        console.warn(`[gateway] cleanup session ${sessionId} failed:`, err.message)
+      );
+    }
+  }
+}, 60_000);
 
 function send(ws, payload) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -46,6 +201,33 @@ function send(ws, payload) {
     console.warn("[gateway] dropping message: ws not OPEN, readyState=%d, type=%s",
       ws.readyState, payload.type);
   }
+}
+
+function sendAssistantResult(ws, payload) {
+  send(ws, {
+    type: ServerEvent.ASSISTANT_RESULT,
+    audioBase64: null,
+    audioMimeType: null,
+    route: "gateway",
+    timing: null,
+    ...payload
+  });
+}
+
+async function speakAndSendAssistantResult(ws, payload, { sampleRate = 24000 } = {}) {
+  const tts = await synthesizeSpeech(payload.speechText || payload.displayText || "", {
+    format: "mp3",
+    sampleRate
+  });
+
+  send(ws, {
+    type: ServerEvent.ASSISTANT_RESULT,
+    route: "gateway",
+    audioBase64: tts?.audioBase64 || null,
+    audioMimeType: tts?.mimeType || null,
+    timing: null,
+    ...payload
+  });
 }
 
 async function synthesizeSpeech(text, options = {}) {
@@ -259,6 +441,190 @@ function humanizeTaskLabel(text) {
   return "飞书";
 }
 
+function getSessionOrThrow(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session || session.closed || !session.ws || session.ws.readyState !== WebSocket.OPEN) {
+    throw new Error("The gateway session is no longer active.");
+  }
+  return session;
+}
+
+function buildVideoOutputMessage(outputs = []) {
+  if (!outputs.length) {
+    return "视频剪辑已提交完成，但暂未在输出目录中发现可下载视频。";
+  }
+
+  if (outputs.length === 1) {
+    return `视频剪辑已完成，生成文件：${outputs[0].fileName}`;
+  }
+
+  return `视频剪辑已完成，共生成 ${outputs.length} 个片段。`;
+}
+
+async function requestVideoSelection(ws, payload) {
+  const requestedName = extractRequestedVideoName(payload.text);
+  const session = sessions.get(payload.sessionId);
+  if (session) {
+    session.pendingVideoEdit = {
+      requestId: randomUUID(),
+      originalText: payload.text,
+      requestedName,
+      createdAt: Date.now()
+    };
+  }
+
+  send(ws, {
+    type: ServerEvent.MEDIA_PICK_REQUEST,
+    sessionId: payload.sessionId,
+    mediaType: "video",
+    requestId: session?.pendingVideoEdit?.requestId || "",
+    originalText: payload.text,
+    requestedName,
+    title: "选择待剪辑视频",
+    message: buildVideoSelectionPrompt(payload.text, requestedName)
+  });
+
+  await speakAndSendAssistantResult(ws, {
+    sessionId: payload.sessionId,
+    route: "gateway",
+    displayText: buildVideoSelectionPrompt(payload.text, requestedName),
+    speechText: requestedName
+      ? `请在相册中选择名为 ${requestedName} 的视频。`
+      : "请在相册中选择要剪辑的视频。",
+    meta: { intent: Intent.EDIT_VIDEO, phase: "selection" }
+  });
+}
+
+async function handleVideoEditUpload({
+  sessionId,
+  userId,
+  originalText,
+  fileName,
+  assetId,
+  requestId,
+  contentType,
+  buffer
+}) {
+  if (!tosClient.isConfigured()) {
+    throw new Error("TOS configuration is missing. Please configure TOS video prefixes first.");
+  }
+
+  const session = getSessionOrThrow(sessionId);
+  const pending = session.pendingVideoEdit;
+  if (!pending) {
+    throw new Error("No pending video edit request was found for this session.");
+  }
+
+  if (requestId && pending.requestId && requestId !== pending.requestId) {
+    throw new Error("The selected video does not match the active edit request.");
+  }
+
+  const editTaskId = randomUUID();
+  const title = "视频剪辑任务";
+  send(session.ws, {
+    type: ServerEvent.ASSISTANT_TASK,
+    sessionId,
+    taskId: editTaskId,
+    status: "running",
+    title,
+    detail: "正在为您上传已选择的视频"
+  });
+
+  const uploaded = await tosClient.uploadVideoBuffer({
+    buffer,
+    fileName,
+    contentType,
+    sessionId
+  });
+
+  send(session.ws, {
+    type: ServerEvent.ASSISTANT_TASK,
+    sessionId,
+    taskId: editTaskId,
+    status: "running",
+    title,
+    detail: "视频已上传，正在提交到云端剪辑服务"
+  });
+
+  await speakAndSendAssistantResult(session.ws, {
+    sessionId,
+    route: "gateway",
+    displayText: "智能剪辑任务已提交，完成后会通知您，请耐心等待",
+    speechText: "智能剪辑任务已提交，完成后会通知您，请耐心等待",
+    meta: { intent: Intent.EDIT_VIDEO, phase: "task-ack" }
+  });
+
+  const outputTosPath = tosClient.buildOutputTosPath(sessionId, editTaskId);
+  const command = buildVideoEditCommand({
+    originalText,
+    videoUrl: uploaded.tosPath,
+    outputTosPath,
+    fileName
+  });
+
+  const arkResult = await arkclawClient.sendTextCommand(command);
+  const taskStatus =
+    arkResult.status === "completed" ? "completed" : arkResult.status === "needs-input" ? "blocked" : "failed";
+
+  let outputs = [];
+  if (arkResult.status === "completed") {
+    outputs = await tosClient.listOutputVideos(sessionId, editTaskId);
+  }
+
+  send(session.ws, {
+    type: ServerEvent.ASSISTANT_TASK,
+    sessionId,
+    taskId: editTaskId,
+    status: taskStatus,
+    title,
+    detail: arkResult.detail
+  });
+
+  if (arkResult.status === "needs-input") {
+    session.pendingVideoEdit = null;
+    session.pendingArkClawFollowUp = {
+      taskId: editTaskId,
+      title,
+      originalCommand: command
+    };
+    await speakAndSendAssistantResult(session.ws, {
+      sessionId,
+      route: "arkclaw",
+      displayText: arkResult.detail,
+      speechText: `还需要你补充信息：${arkResult.detail}`,
+      meta: { intent: Intent.EDIT_VIDEO, phase: "result" }
+    });
+    session.userId = userId || session.userId;
+    return { uploaded, outputs: [] };
+  }
+
+  const displayText =
+    arkResult.status === "completed"
+      ? `${arkResult.detail}\n\n${buildVideoOutputMessage(outputs)}`
+      : arkResult.detail;
+
+  const speechText =
+    arkResult.status === "completed"
+      ? "您的智能剪辑任务已完成，请在作品中查看"
+      : "视频剪辑任务未能完成。";
+
+  const editE2EMs = pending.createdAt ? Date.now() - pending.createdAt : 0;
+
+  await speakAndSendAssistantResult(session.ws, {
+    sessionId,
+    route: "arkclaw",
+    displayText,
+    speechText,
+    mediaItems: outputs,
+    timing: { editE2EMs },
+    meta: { intent: Intent.EDIT_VIDEO, phase: "result" }
+  });
+
+  session.pendingVideoEdit = null;
+  session.userId = userId || session.userId;
+  return { uploaded, outputs };
+}
+
 async function generateSpeechText(userText, taskLabel, context = "ack", status = "completed") {
   try {
     const response = await fetch(`${veadkAgentUrl}/speech`, {
@@ -297,7 +663,9 @@ async function delegateToArkClaw(payload, ws, taskLabel) {
   const tArkStart = Date.now();
 
   try {
-    const result = await arkclawClient.sendTextCommand(payload.text);
+    const result = await arkclawClient.sendTextCommand(
+      rewriteForArkClaw(payload.text, Intent.SEND_FEISHU_MESSAGE)
+    );
     const tArkDone = Date.now();
     console.log(`[gateway] delegateToArkClaw result.status=${result.status}, arkMs=${tArkDone - tArkStart}`);
 
@@ -361,10 +729,125 @@ async function handleUserTranscript(ws, payload) {
     createSessionState(SessionState.THINKING, "Processing user request.", payload.sessionId)
   );
 
+  const session = sessions.get(payload.sessionId);
+
+  // VIDEO_SELECT is only valid when there's a pending video edit context
+  if (session?.pendingVideoEdit && VIDEO_SELECT_PATTERNS.some((p) => p.test(payload.text))) {
+    sendAssistantResult(ws, {
+      sessionId: payload.sessionId,
+      route: "gateway",
+      displayText: "",
+      speechText: "",
+      meta: { intent: Intent.VIDEO_SELECT, phase: "ack" }
+    });
+
+    send(ws, {
+      type: ServerEvent.MEDIA_PICK_SELECT,
+      sessionId: payload.sessionId,
+      selectionText: payload.text
+    });
+    return;
+  }
+
   const intent = detectIntent(payload.text);
 
+  if (session?.pendingArkClawFollowUp) {
+    const followUpPatterns = [
+      /^继续/,
+      /^好的/,
+      /^可以/,
+      /^行/,
+      /^对/,
+      /^是/,
+      /^嗯/,
+      /^好/,
+      /^确认/,
+      /^同意/,
+      /^没问题/,
+      /^OK/i,
+      /^yes/i,
+      /^yeah/i,
+      /^sure/i,
+    ];
+    const isFollowUp = followUpPatterns.some((p) => p.test(payload.text));
+
+    if (isFollowUp || intent === Intent.GENERAL_CHAT) {
+      console.log(`[gateway] routing follow-up to ArkClaw, text="${payload.text.slice(0, 60)}"`);
+      const followUp = session.pendingArkClawFollowUp;
+      session.pendingArkClawFollowUp = null;
+
+      send(ws, {
+        type: ServerEvent.ASSISTANT_TASK,
+        sessionId: payload.sessionId,
+        taskId: followUp.taskId,
+        status: "running",
+        title: followUp.title,
+        detail: "正在将你的回复发送给 ArkClaw"
+      });
+
+      try {
+        const arkResult = await arkclawClient.sendTextCommand(
+          rewriteArkClawFollowUp(payload.text, followUp.originalCommand)
+        );
+
+        const taskStatus = arkResult.status === "completed" ? "completed"
+          : arkResult.status === "needs-input" ? "blocked" : "failed";
+
+        send(ws, {
+          type: ServerEvent.ASSISTANT_TASK,
+          sessionId: payload.sessionId,
+          taskId: followUp.taskId,
+          status: taskStatus,
+          title: followUp.title,
+          detail: arkResult.detail
+        });
+
+        if (arkResult.status === "needs-input") {
+          session.pendingArkClawFollowUp = {
+            taskId: followUp.taskId,
+            title: followUp.title,
+            originalCommand: followUp.originalCommand
+          };
+          await speakAndSendAssistantResult(ws, {
+            sessionId: payload.sessionId,
+            route: "arkclaw",
+            displayText: arkResult.detail,
+            speechText: `还需要你补充信息：${arkResult.detail}`,
+            meta: { intent: Intent.EDIT_VIDEO, phase: "result" }
+          });
+        } else {
+          await speakAndSendAssistantResult(ws, {
+            sessionId: payload.sessionId,
+            route: "arkclaw",
+            displayText: arkResult.detail,
+            speechText: arkResult.status === "completed" ? "剪辑完成，可以手机上查看了" : "视频剪辑任务未能完成。",
+            meta: { intent: Intent.EDIT_VIDEO, phase: "result" }
+          });
+        }
+      } catch (error) {
+        console.error("[gateway] arkclaw follow-up failed:", error.message);
+        session.pendingArkClawFollowUp = followUp;
+        send(ws, {
+          type: ServerEvent.ASSISTANT_TASK,
+          sessionId: payload.sessionId,
+          taskId: followUp.taskId,
+          status: "failed",
+          title: followUp.title,
+          detail: error.message
+        });
+        await speakAndSendAssistantResult(ws, {
+          sessionId: payload.sessionId,
+          route: "arkclaw",
+          displayText: error.message,
+          speechText: "跟进任务处理失败，请重试。",
+          meta: { intent: Intent.EDIT_VIDEO, phase: "error" }
+        });
+      }
+      return;
+    }
+  }
+
   if (intent === Intent.TAKE_PHOTO) {
-    const session = sessions.get(payload.sessionId);
     if (session) {
       session.pendingPhotoText = payload.text;
     }
@@ -373,6 +856,67 @@ async function handleUserTranscript(ws, payload) {
       sessionId: payload.sessionId,
       text: payload.text
     });
+    return;
+  }
+
+  if (intent === Intent.TAKE_VIDEO) {
+    send(ws, {
+      type: ServerEvent.CAPTURE_VIDEO_REQUEST,
+      sessionId: payload.sessionId,
+      text: payload.text
+    });
+
+    await speakAndSendAssistantResult(ws, {
+      sessionId: payload.sessionId,
+      route: "gateway",
+      displayText: "🎬 已开始录制视频，录制完成后会自动保存到本地相册。",
+      speechText: "已经开始录制视频，请保持镜头稳定。",
+      meta: { intent, phase: "result" }
+    });
+    return;
+  }
+
+  if (intent === Intent.STOP_VIDEO) {
+    send(ws, {
+      type: ServerEvent.STOP_VIDEO_REQUEST,
+      sessionId: payload.sessionId,
+      text: payload.text
+    });
+
+    await speakAndSendAssistantResult(ws, {
+      sessionId: payload.sessionId,
+      route: "gateway",
+      displayText: "🎬 已停止视频录制，当前内容会保存到本地相册。",
+      speechText: "已经停止录制视频，并保存到本地相册。",
+      meta: { intent, phase: "result" }
+    });
+    return;
+  }
+
+  if (intent === Intent.EDIT_VIDEO) {
+    if (!tosClient.isConfigured()) {
+      sendAssistantResult(ws, {
+        sessionId: payload.sessionId,
+        route: "gateway",
+        displayText: "视频剪辑功能尚未配置完成，缺少 TOS 相关配置。",
+        speechText: "视频剪辑功能还没有配置完成。",
+        meta: { intent, phase: "result" }
+      });
+      return;
+    }
+
+    if (isVideoEditDescriptionAmbiguous(payload.text)) {
+      await speakAndSendAssistantResult(ws, {
+        sessionId: payload.sessionId,
+        route: "gateway",
+        displayText: "请先告诉我你想怎么剪，比如保留哪一段、做成 Vlog、高光提取，或者突出什么内容。",
+        speechText: "请先告诉我你想怎么剪这个视频。",
+        meta: { intent, phase: "result" }
+      });
+      return;
+    }
+
+    await requestVideoSelection(ws, payload);
     return;
   }
 
@@ -473,38 +1017,41 @@ async function handleUserTranscript(ws, payload) {
         );
       });
 
-    const comfortText = await generateSpeechText(payload.text, taskLabel, "ack");
-    const tTtsAckStart = Date.now();
-    const comfortTts = await synthesizeSpeech(comfortText);
-    tAck = Date.now();
+    const sessionAfterDelegate = sessions.get(payload.sessionId);
+    if (sessionAfterDelegate && !sessionAfterDelegate.closed && ws.readyState === WebSocket.OPEN) {
+      const comfortText = await generateSpeechText(payload.text, taskLabel, "ack");
+      const tTtsAckStart = Date.now();
+      const comfortTts = await synthesizeSpeech(comfortText);
+      tAck = Date.now();
 
-    send(ws, {
-      type: ServerEvent.ASSISTANT_RESULT,
-      sessionId: payload.sessionId,
-      route: "arkclaw",
-      speechText: comfortText,
-      displayText: comfortText,
-      audioBase64: comfortTts?.audioBase64 || null,
-      audioMimeType: comfortTts?.mimeType || null,
-      meta: { intent, phase: "ack" },
-      timing: {
-        asrMs: t1 - tAsrStart,
-        agentMs: 0,
-        ttsMs: tAck - tTtsAckStart,
-        totalMs: tAck - t0,
-        ttftMs: tAck - t0,
-        ttfaMs: tAck - t0
-      }
-    });
+      send(ws, {
+        type: ServerEvent.ASSISTANT_RESULT,
+        sessionId: payload.sessionId,
+        route: "arkclaw",
+        speechText: comfortText,
+        displayText: comfortText,
+        audioBase64: comfortTts?.audioBase64 || null,
+        audioMimeType: comfortTts?.mimeType || null,
+        meta: { intent, phase: "ack" },
+        timing: {
+          asrMs: t1 - tAsrStart,
+          agentMs: 0,
+          ttsMs: tAck - tTtsAckStart,
+          totalMs: tAck - t0,
+          ttftMs: tAck - t0,
+          ttfaMs: tAck - t0
+        }
+      });
 
-    send(
-      ws,
-      createSessionState(SessionState.SPEAKING, "Acknowledged. Delegating to ArkClaw.", payload.sessionId)
-    );
-    send(
-      ws,
-      createSessionState(SessionState.LISTENING, "Waiting for the next utterance.", payload.sessionId)
-    );
+      send(
+        ws,
+        createSessionState(SessionState.SPEAKING, "Acknowledged. Delegating to ArkClaw.", payload.sessionId)
+      );
+      send(
+        ws,
+        createSessionState(SessionState.LISTENING, "Waiting for the next utterance.", payload.sessionId)
+      );
+    }
 
     return;
   }
@@ -534,6 +1081,15 @@ async function handleUserTranscript(ws, payload) {
         totalMs: Date.now() - t0
       }
     });
+    send(
+      ws,
+      createSessionState(SessionState.SPEAKING, "Error response ready.", payload.sessionId)
+    );
+    send(
+      ws,
+      createSessionState(SessionState.LISTENING, "Waiting for the next utterance.", payload.sessionId)
+    );
+    return;
   }
 
   send(
@@ -606,8 +1162,12 @@ function createGatewaySession(sessionId, ws, userId) {
     processing: false,
     asrSession: null,
     closed: false,
+    createdAt: Date.now(),
     lastAudioChunkAt: 0,
-    firstAudioChunkAt: 0
+    firstAudioChunkAt: 0,
+    pendingPhotoText: null,
+    pendingVideoEdit: null,
+    pendingArkClawFollowUp: null
   };
 
   if (!volcAsrClient.isConfigured()) {
@@ -713,7 +1273,14 @@ async function closeSession(sessionId) {
   console.log(`[gateway] session ${sessionId} closed`);
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, request) => {
+  const origin = request.headers.origin;
+  if (allowedOrigins.length > 0 && (!origin || !allowedOrigins.includes(origin))) {
+    console.warn("[gateway] rejected websocket origin:", origin || "(missing)");
+    ws.close(1008, "origin not allowed");
+    return;
+  }
+
   ws.on("message", async (message) => {
     const payload = JSON.parse(message.toString());
 
